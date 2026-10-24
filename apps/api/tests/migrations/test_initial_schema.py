@@ -1,35 +1,46 @@
-"""Migration round-trip: upgrade head, downgrade base, and models match the migrated schema."""
+"""Migration checks: fresh database, round trip, re-applying at head, and no model drift."""
 
-from sqlalchemy import Engine, inspect, text
+from pathlib import Path
 
 from alembic import command
-from tests.conftest import alembic_config
+from sqlalchemy import inspect
+
+from app.core.db import create_db_engine
+from tests.conftest import alembic_config, sqlite_url
 
 
-def _user_tables(engine: Engine) -> set[str]:
-    return set(inspect(engine).get_table_names()) - {"alembic_version"}
-
-
-def _enum_count(engine: Engine) -> int:
-    with engine.connect() as conn:
-        return int(
-            conn.execute(text("SELECT count(*) FROM pg_type WHERE typtype = 'e'")).scalar_one()
-        )
-
-
-def test_downgrade_base_then_upgrade_head(db_engine: Engine, db_url: str) -> None:
-    cfg = alembic_config(db_url)
+def _user_tables(url: str) -> set[str]:
+    engine = create_db_engine(url)
     try:
-        command.downgrade(cfg, "base")
-        assert _user_tables(db_engine) == set()
-        assert _enum_count(db_engine) == 0
+        return set(inspect(engine).get_table_names()) - {"alembic_version"}
     finally:
-        command.upgrade(cfg, "head")
-
-    assert len(_user_tables(db_engine)) == 15
-    assert _enum_count(db_engine) == 15
+        engine.dispose()
 
 
-def test_models_match_migrations(db_engine: Engine, db_url: str) -> None:
+def test_upgrade_creates_a_fresh_database(tmp_path: Path) -> None:
+    url = sqlite_url(tmp_path / "nested" / "fresh.db")
+
+    command.upgrade(alembic_config(url), "head")
+
+    assert len(_user_tables(url)) == 19
+
+
+def test_upgrade_on_current_schema_is_a_no_op(db_url: str) -> None:
+    command.upgrade(alembic_config(db_url), "head")
+
+    assert len(_user_tables(db_url)) == 19
+
+
+def test_downgrade_base_then_upgrade_head(db_url: str) -> None:
+    cfg = alembic_config(db_url)
+
+    command.downgrade(cfg, "base")
+    assert _user_tables(db_url) == set()
+
+    command.upgrade(cfg, "head")
+    assert len(_user_tables(db_url)) == 19
+
+
+def test_models_match_migrations(db_url: str) -> None:
     # Raises if autogenerate would emit any operation, i.e. models and migrations drifted.
     command.check(alembic_config(db_url))

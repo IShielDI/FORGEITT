@@ -1,28 +1,26 @@
-"""Shared fixtures. DB tests run against a real Postgres test database migrated with Alembic.
+"""Shared fixtures. DB tests use temporary SQLite files built by the real Alembic migrations.
 
-Set TEST_DATABASE_URL to point elsewhere. If the database is unreachable, DB tests are skipped
-locally but fail when REQUIRE_DB=1 (as in CI), so a missing database never passes silently.
+The schema is migrated once per session into a template file; each test gets its own copy,
+so tests are isolated without relying on SQLite savepoint quirks.
 """
 
-import os
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine, create_engine, text
-from sqlalchemy.engine import make_url
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
-from alembic import command
+from app.core.db import create_db_engine
 
 API_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TEST_DATABASE_URL = "postgresql+psycopg://app:app@localhost:5432/collab_test"
 
 
-def get_test_database_url() -> str:
-    return os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
+def sqlite_url(path: Path) -> str:
+    return f"sqlite:///{path.as_posix()}"
 
 
 def alembic_config(url: str) -> Config:
@@ -32,51 +30,37 @@ def alembic_config(url: str) -> Config:
     return cfg
 
 
-def _ensure_database_exists(url: str) -> None:
-    target = make_url(url)
-    admin = create_engine(target.set(database="postgres"), isolation_level="AUTOCOMMIT")
-    try:
-        with admin.connect() as conn:
-            exists = conn.execute(
-                text("SELECT 1 FROM pg_database WHERE datname = :name"), {"name": target.database}
-            ).scalar()
-            if not exists:
-                conn.execute(text(f'CREATE DATABASE "{target.database}"'))
-    finally:
-        admin.dispose()
-
-
 @pytest.fixture(scope="session")
-def db_url() -> str:
-    url = get_test_database_url()
-    try:
-        _ensure_database_exists(url)
-    except OperationalError as exc:
-        if os.environ.get("REQUIRE_DB") == "1":
-            pytest.fail(f"Test database required but unreachable: {exc}")
-        pytest.skip("Test database unreachable; run `docker compose up -d db`.")
-    return url
+def migrated_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A database file at migration head, built once per test session."""
+    path = tmp_path_factory.mktemp("db") / "template.db"
+    command.upgrade(alembic_config(sqlite_url(path)), "head")
+    return path
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
+def db_path(migrated_template: Path, tmp_path: Path) -> Path:
+    path = tmp_path / "test.db"
+    shutil.copyfile(migrated_template, path)
+    return path
+
+
+@pytest.fixture
+def db_url(db_path: Path) -> str:
+    return sqlite_url(db_path)
+
+
+@pytest.fixture
 def db_engine(db_url: str) -> Iterator[Engine]:
-    """Engine for a test database rebuilt from migrations once per session."""
-    cfg = alembic_config(db_url)
-    command.downgrade(cfg, "base")
-    command.upgrade(cfg, "head")
-    engine = create_engine(db_url)
+    engine = create_db_engine(db_url)
     yield engine
     engine.dispose()
 
 
 @pytest.fixture
 def db_session(db_engine: Engine) -> Iterator[Session]:
-    """Session inside an outer transaction that is rolled back after each test."""
-    with db_engine.connect() as connection:
-        transaction = connection.begin()
-        session = Session(bind=connection, join_transaction_mode="create_savepoint")
-        try:
-            yield session
-        finally:
-            session.close()
-            transaction.rollback()
+    session = Session(bind=db_engine, autoflush=False)
+    try:
+        yield session
+    finally:
+        session.close()

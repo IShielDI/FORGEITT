@@ -1,11 +1,10 @@
-import uuid
 from typing import Any
 
 from sqlalchemy import CheckConstraint, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, pg_enum
-from app.models.columns import jsonb_object, user_fk, uuid_array, workspace_fk
+from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum
+from app.models.columns import id_list, json_object, user_fk, workspace_fk
 from app.models.enums import SpecItemKind, SpecItemStatus
 
 
@@ -15,20 +14,20 @@ class SpecItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "spec_items"
     __table_args__ = (CheckConstraint("version >= 1", name="version_positive"),)
 
-    workspace_id: Mapped[uuid.UUID] = workspace_fk()
-    kind: Mapped[SpecItemKind] = mapped_column(pg_enum(SpecItemKind, "spec_item_kind"))
+    workspace_id: Mapped[str] = workspace_fk()
+    kind: Mapped[SpecItemKind] = mapped_column(str_enum(SpecItemKind, "spec_item_kind"))
     text: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[SpecItemStatus] = mapped_column(
-        pg_enum(SpecItemStatus, "spec_item_status"),
+        str_enum(SpecItemStatus, "spec_item_status"),
         nullable=False,
         default=SpecItemStatus.PROPOSED,
         server_default=SpecItemStatus.PROPOSED.value,
     )
-    source_message_ids: Mapped[list[uuid.UUID]] = uuid_array()
+    source_message_ids: Mapped[list[str]] = id_list()
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     # Null created_by means the observer agent proposed it; confirmed_by is always a human.
-    created_by: Mapped[uuid.UUID | None] = user_fk(nullable=True)
-    confirmed_by: Mapped[uuid.UUID | None] = user_fk(nullable=True)
+    created_by: Mapped[str | None] = user_fk(nullable=True, index=False)
+    confirmed_by: Mapped[str | None] = user_fk(nullable=True, index=False)
 
 
 class SpecVersion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -40,6 +39,6 @@ class SpecVersion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("version >= 1", name="version_positive"),
     )
 
-    workspace_id: Mapped[uuid.UUID] = workspace_fk()
+    workspace_id: Mapped[str] = workspace_fk()
     version: Mapped[int] = mapped_column(Integer, nullable=False)
-    snapshot_json: Mapped[dict[str, Any]] = jsonb_object()
+    snapshot_json: Mapped[dict[str, Any]] = json_object()

@@ -1,4 +1,4 @@
-"""Domain enums, stored as native Postgres enum types."""
+"""Domain enums, stored as their lowercase values with CHECK constraints."""
 
 from enum import StrEnum
 
@@ -6,11 +6,11 @@ from enum import StrEnum
 class MemberRole(StrEnum):
     OWNER = "owner"
     MEMBER = "member"
-    OBSERVER = "observer"
+    VIEWER = "viewer"
 
 
 class VerificationProfile(StrEnum):
-    LIGHT = "light"
+    FAST = "fast"
     STANDARD = "standard"
     STRICT = "strict"
 
@@ -51,7 +51,7 @@ class TaskStatus(StrEnum):
 
 
 class EntityType(StrEnum):
-    """Node types in the knowledge store (ARCHITECTURE section 7)."""
+    """Node types in the knowledge store (ARCHITECTURE section 8)."""
 
     REQUIREMENT = "requirement"
     DECISION = "decision"
@@ -82,14 +82,12 @@ class RunStatus(StrEnum):
 class CheckKind(StrEnum):
     MERGE = "merge"
     BUILD = "build"
-    UNIT_TEST = "unit_test"
+    LOCKED_TEST = "locked_test"
+    HIDDEN_TEST = "hidden_test"
     LINT = "lint"
-    TYPECHECK = "typecheck"
     CONTRACT = "contract"
     DEPENDENCY_SCAN = "dependency_scan"
     SECRET_SCAN = "secret_scan"  # noqa: S105 - check name, not a credential
-    BROWSER = "browser"
-    HIDDEN_TEST = "hidden_test"
 
 
 class CheckStatus(StrEnum):
@@ -99,6 +97,23 @@ class CheckStatus(StrEnum):
     FAILED = "failed"
     ERROR = "error"
     SKIPPED = "skipped"
+
+
+class HiddenTestStatus(StrEnum):
+    DRAFT = "draft"
+    APPROVED = "approved"
+    RETIRED = "retired"
+
+
+class RefereeVerdict(StrEnum):
+    """TRD R11. Only PASS counts as a pass; every other verdict is non-passing."""
+
+    PASS = "pass"  # noqa: S105 - verdict name, not a credential
+    APP_FAILURE = "app_failure"
+    BROWSER_FAILURE = "browser_failure"
+    SERVICE_ERROR = "service_error"
+    INCONCLUSIVE = "inconclusive"
+    NOT_RUN = "not_run"
 
 
 class FailureStatus(StrEnum):
@@ -111,6 +126,13 @@ class FailureStatus(StrEnum):
 class ApprovalDecision(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
+
+
+class CreditKind(StrEnum):
+    PORTION = "portion"
+    USAGE = "usage"
+    LOAN = "loan"
+    HOUSE = "house"
 
 
 class JobStatus(StrEnum):

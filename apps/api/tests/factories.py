@@ -17,7 +17,7 @@ def make_user(session: Session, name: str = "Ada") -> User:
 
 def make_workspace(session: Session, owner: User | None = None) -> Workspace:
     owner = owner or make_user(session)
-    workspace = Workspace(room_code=uuid.uuid4().hex[:8], name="Demo", owner_id=owner.id)
+    workspace = Workspace(name="Demo", slug="demo", owner_id=owner.id)
     session.add(workspace)
     session.flush()
     return workspace
@@ -35,7 +35,7 @@ def make_run(session: Session, workspace: Workspace) -> IntegrationRun:
         workspace_id=workspace.id,
         candidate_branch="candidate/test",
         base_sha="a" * 40,
-        profile=VerificationProfile.LIGHT,
+        profile=VerificationProfile.FAST,
     )
     session.add(run)
     session.flush()
