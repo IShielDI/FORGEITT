@@ -15,7 +15,7 @@ def add_key(member_id, provider, key_type, secret):
     )
 
 
-def get_secret(member_id, provider="anthropic"):
+def get_secret(member_id: int, provider: str = "anthropic") -> str | None:
     k = q1(
         "SELECT * FROM keys WHERE member_id=? AND provider=? AND status='active' ORDER BY id DESC",
         (member_id, provider),
@@ -48,7 +48,8 @@ def _contrib(room, m):
 
 def _own_spent(room, m):
     return q1(
-        "SELECT COALESCE(SUM(cost),0) s FROM ledger WHERE room_id=? AND member_id=? AND loan_id IS NULL",
+        "SELECT COALESCE(SUM(cost),0) s FROM ledger WHERE room_id=? AND member_id=? AND loan_id IS NULL "
+        "AND COALESCE(source,'own')='own'",
         (room, m),
     )["s"]
 
@@ -88,6 +89,29 @@ def room_view(room, m):
     return {"pool_total": pool, "pool_spent": spent, "me": balance(room, m)}
 
 
+def house_spent(room, m=None):
+    sql, args = (
+        "SELECT COALESCE(SUM(cost),0) s FROM ledger WHERE room_id=? AND source='house'",
+        [room],
+    )
+    if m is not None:
+        sql += " AND member_id=?"
+        args.append(m)
+    return q1(sql, args)["s"]
+
+
+def house_available(room, m):
+    """The capped house key (stage 25): off unless enabled, a key is set, and BOTH caps are set."""
+    from app.core import config
+
+    if not (config.HOUSE_KEY_ENABLED and config.ANTHROPIC_API_KEY):
+        return False
+    ws_cap, person_cap = config.HOUSE_CAP_WORKSPACE_USD, config.HOUSE_CAP_PERSON_USD
+    if ws_cap is None or person_cap is None:
+        return False  # caps are a team decision; without them the house key never pays
+    return house_spent(room) < ws_cap - BUFFER and house_spent(room, m) < person_cap - BUFFER
+
+
 def pick_key(room, m):
     """Own portion first, then an active loan's key. Returns (member_id_whose_key, loan_id|None) or None if nothing covers the buffer."""
     b = balance(room, m)
@@ -99,14 +123,17 @@ def pick_key(room, m):
     ):
         if l["cap"] - l["used"] > BUFFER:
             return (l["lender"], l["id"])
+    if house_available(room, m):
+        return ("house", None)  # last resort, within the per-workspace and per-person caps
     return None
 
 
-def record_call(room, m, agent, model, call_id, tin, tout, tcr, tcw, loan_id):
+def record_call(room, m, agent, model, call_id, tin, tout, tcr, tcw, loan_id, source=None):
     cost = cost_of(model, tin, tout, tcr, tcw)
+    source = source or ("loan" if loan_id else "own")
     ex(
-        "INSERT INTO ledger(room_id,member_id,agent,model,call_id,tin,tout,tcr,tcw,cost,loan_id,ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (room, m, agent, model, call_id, tin, tout, tcr, tcw, cost, loan_id, now()),
+        "INSERT INTO ledger(room_id,member_id,agent,model,call_id,tin,tout,tcr,tcw,cost,loan_id,ts,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (room, m, agent, model, call_id, tin, tout, tcr, tcw, cost, loan_id, now(), source),
     )
     cap_reached = False
     if loan_id:

@@ -70,28 +70,28 @@ Companion to PRD.md and ARCHITECTURE.md. Status: v2 (fixes applied).
 Rules: confirmed spec items and contracts are append-only; edits create a new version. A confirmed suggestion becomes a `decision` item.
 
 ### 3.1 Implemented schema (current)
-The list above is the target model. The running code reuses the existing Referee platform (AGENTS rule 8). Its schema lives in `apps/api/app/models/tables.py`, is applied by Alembic migration `0001`, and the services query it with plain SQL through `app.core.db`. A "room" is a workspace. IDs are integers, and timestamps are Unix epoch seconds.
+The list above is the target model. The running code reuses the existing Referee platform (AGENTS rule 8) and adds the missing stages. The schema lives in `apps/api/app/models/tables.py` and is applied by Alembic migrations `0001`–`0010`. The services query it with plain SQL through `app.core.db`. A "room" is a workspace; IDs are integers, and timestamps are Unix epoch seconds.
 
 | TRD entity | Implemented as | Notes |
 |---|---|---|
-| workspaces | `rooms(id, name, slug, created, mode[sample\|blank], bootstrapped)` | `slug` is a display label only; no `allowed_providers` or `verification_profile` yet |
-| users + members | `members(id, room_id, name, email, token_hash, is_owner, role[owner\|member\|viewer])` | One hashed login token per member, issued at room creation or when an invite is accepted; viewers are read-only |
-| invites | `invites(id, room_id, token_hash, role, email, created_by, created, expires, used_at, used_by)` | Single-use, 7-day expiry, hash only; `POST /api/rooms/{id}/invites` (owner), `POST /api/invites/{token}/accept` |
-| messages | none yet (agent activity is in `events`) | Stage 4 |
-| spec_items, spec_versions | none yet | Stages 7 and 8 |
-| contracts | `memory` rows with kind `contract`/`contract-change`, plus `protected/contracts/*.json` in the repo | Stage 9 |
-| tasks | `agents`, `agent_catalog`, `parts` (part ownership and dependencies) | Stage 9 |
-| knowledge_links | `memory` (kinds: decision, contract, handoff, failure, ...) | Stage 10 |
-| submissions + integration_runs + check_results | `changes(..., status, evidence JSON, verdict, kind[normal\|bootstrap])` | Test results live in `changes.evidence` |
-| hidden_tests | files in `<GIT_STORAGE_PATH>/rooms/<id>/holdout/` | Outside every agent workspace; only file names are served |
-| referee_runs | `referee_runs(id, room_id, ts, runner, steps)` for the hourly cap; verdicts in `changes.evidence.referee` | |
-| failures | `memory` kind `failure`; routing in `changes.evidence.routed` | |
-| approvals | `merges(id, room_id, change_ids, snapshot, approver, ts, undone)` | Not yet bound to a candidate SHA (R4) |
-| credit_ledger | `ledger`, `contributions`, `requests`, `loans`, `checkpoints`, `keys`, `prices` | Each member brings their own encrypted Claude key |
-| jobs | none: in-process threads plus `app/workers/background.py` | |
-| (audit) | `attempts` (blocked firewall actions), `events` (live activity) | |
+| workspaces | `rooms(id, name, slug, created, mode, bootstrapped, allowed_providers, observer_cursor, verification_profile, edit_scope)` | `slug` is a display label only; `mode` is sample, todo or blank; `edit_scope` off/task |
+| users + members | `members(id, room_id, name, email, token_hash, is_owner, role)` | One hashed token per member; roles owner, member, viewer |
+| invites | `invites(id, room_id, token_hash, role, email, created_by, created, expires, used_at, used_by)` | Single-use, 7-day expiry, hash only |
+| messages | `messages(id, room_id, member_id, body, ts)` | REST plus WebSocket `/api/rooms/{id}/ws` |
+| spec_items, spec_versions | `spec_items(..., status, source_message_ids, version, supersedes_id, created_by, confirmed_by)`, `spec_versions(room_id, version, snapshot)` | Append-only edits; a confirmed suggestion becomes a decision |
+| contracts | `contracts(room_id, kind, name, content, version, status, spec_item_ids)` | Versioned; tasks pin contract ids |
+| tasks | `tasks(room_id, key, title, description, component, depends_on, owner_member_id, status, spec_item_ids, contract_ids)` | Acyclic dependencies; start needs an approved plan and contracts |
+| knowledge_links | `knowledge_links(room_id, src_type, src_id, dst_type, dst_id, relation, version, created_by, created)` | Requirement/decision → task, contract → task, task → change → file/commit. `GET /api/rooms/{id}/graph` serves the project map (with parts and files from the part map); `GET /api/tasks/{id}/files` lists a task's relevant files, which head its context pack. With `edit_scope=task`, a task's change may only touch those files, checked at submission (`rejected_scope`) |
+| submissions + integration_runs + check_results | `changes(..., task_id, commit_sha, handoff, verified_sha, status, evidence, verdict)` | `evidence.tests.checks` holds each check's command, exit code, duration and log path |
+| hidden_tests | `hidden_tests(room_id, filename, author_id, approved_by, status)`, plus files in the room's `holdout_drafts/` and `holdout/` | Source never stored in the database or served |
+| referee_runs | `referee_runs(room_id, ts, runner, steps)` for the hourly cap; verdicts in `changes.evidence.referee` | |
+| failures | `memory` rows with kind `failure` (`part, confidence, alternates, assigned_to, triage, state`) | Reassign and resolve endpoints |
+| approvals | `merges(room_id, change_ids, snapshot, approver, candidate_sha, merged_sha, release_tag, undone)` | Bound to the verified commit; tagged `release/<n>` |
+| credit_ledger | `ledger(..., cost, loan_id, source[own\|loan\|house])`, `contributions`, `requests`, `loans`, `checkpoints`, `keys`, `prices` | Every model call (both paths) writes a row |
+| jobs | none: in-process threads plus `app/workers/background.py` (observer, housekeeping, referee pile) | |
+| (also) | `agents`, `agent_catalog`, `parts`, `attempts`, `events` | Agent instances, roles, part ownership, blocked actions, live activity |
 
-Conventions: every room-scoped table indexes `room_id`. Every connection sets `foreign_keys=ON`, `journal_mode=WAL` and a busy timeout. The database lives in `PLATFORM_STATE` (default `data/state/forgeit.db`), a sibling of the workspace data in `GIT_STORAGE_PATH`, never inside or above it. Model prices are seeded by the migration. Apply the schema with `cd apps/api && alembic upgrade head`; the API also runs the migrations at startup.
+Conventions: every room-scoped table indexes `room_id`. Every connection sets `foreign_keys=ON`, `journal_mode=WAL` and a busy timeout. The database lives in `PLATFORM_STATE` (default `data/state/forgeit.db`), a sibling of the workspace data in `GIT_STORAGE_PATH`. Apply the schema with `cd apps/api && alembic upgrade head`; the API also runs the migrations at startup.
 
 ## 4. API Surface (REST + WS)
 

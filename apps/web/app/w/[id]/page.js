@@ -5,6 +5,11 @@ import Feed from "../../../components/Feed";
 import Ladder from "../../../components/Ladder";
 import Setup from "../../../components/Setup";
 import Credits from "../../../components/Credits";
+import Chat from "../../../components/Chat";
+import Spec from "../../../components/Spec";
+import Plan from "../../../components/Plan";
+import HiddenTests from "../../../components/HiddenTests";
+import Graph from "../../../components/Graph";
 
 const STATUS = { tests_failed: "tests failed", rejected_firewall: "rejected by the firewall", conflict: "merge conflict", ready: "waiting for the referee", referee: "referee running",
   passed: "checked, ready to approve", referee_failed: "referee found a problem", inconclusive: "needs a human look", bootstrap_review: "first build, needs review", merged: "merged", undone: "undone" };
@@ -13,7 +18,7 @@ export default function Room({ params }) {
   const rid = Number(params.id);
   const [signedIn, setSignedIn] = useState(null); const [tok, setTok] = useState("");
   const [room, setRoom] = useState(null); const [me, setMe] = useState(null); const [catalog, setCatalog] = useState([]); const [models, setModels] = useState([]); const [changes, setChanges] = useState([]);
-  const [tab, setTab] = useState("work"); const [agent, setAgent] = useState(""); const [model, setModel] = useState(""); const [task, setTask] = useState("");
+  const [tab, setTab] = useState("chat"); const [agent, setAgent] = useState(""); const [model, setModel] = useState(""); const [task, setTask] = useState("");
   const [sel, setSel] = useState(null); const [err, setErr] = useState(""); const [key, setKey] = useState(""); const [spend, setSpend] = useState("2"); const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -60,11 +65,15 @@ export default function Room({ params }) {
         <div><h1>{room.room.name}</h1><p className="muted small">Signed in as <b>{me.name}</b>{me.is_owner ? " (owner)" : ""} · agents run {room.sandbox === "docker" ? "in Docker, with no network" : <span className="err">without isolation (no Docker found)</span>}</p></div>
       </div>
       <div className="tabs" role="tablist">
-        {[["work", "Work"], ["credits", "Credits"], ["setup", "Setup"]].map(([k, l]) => <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}>{l}</button>)}
+        {[["chat", "Chat"], ["spec", "Spec"], ["plan", "Plan"], ["graph", "Graph"], ["work", "Runs"], ["credits", "Credits"], ["setup", "Setup"]].map(([k, l]) => <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}>{l}</button>)}
       </div>
 
+      {tab === "chat" && <Chat rid={rid} me={me} members={room.members} />}
+      {tab === "spec" && <Spec rid={rid} me={me} />}
+      {tab === "plan" && <Plan rid={rid} me={me} members={room.members} />}
+      {tab === "graph" && <Graph rid={rid} />}
       {tab === "credits" && <Credits rid={rid} me={me} members={room.members} />}
-      {tab === "setup" && <Setup rid={rid} me={me} room={room} catalog={catalog} models={models} reload={load} />}
+      {tab === "setup" && <><Setup rid={rid} me={me} room={room} catalog={catalog} models={models} reload={load} /><HiddenTests rid={rid} me={me} members={room.members} /></>}
       {tab === "work" && (
         <div className="cols">
           <aside>

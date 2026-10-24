@@ -1,4 +1,12 @@
+"""Managed git repos per workspace: the protected original (main), per-task clones, snapshots, undo.
+
+Only the Merge Service may move `main`: a `reference-transaction` hook in every original rejects any
+update of refs/heads/main (local or pushed from a clone) unless FORGEIT_MERGE_SERVICE=1 is set by
+`merge_branches`/`undo_to`. Git is always called with an argument list, never through a shell.
+"""
+
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -6,12 +14,46 @@ from pathlib import Path
 
 from app.core.config import DATA, SAMPLE
 
+MERGE_ENV = "FORGEIT_MERGE_SERVICE"
+BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
+GUARD_HOOK = """#!/bin/sh
+# ForgeIt: main is protected. Only the Merge Service (after a recorded human approval) may update it.
+[ "$1" = "prepared" ] || exit 0
+[ "$FORGEIT_MERGE_SERVICE" = "1" ] && exit 0
+while read -r old new ref; do
+  if [ "$ref" = "refs/heads/main" ]; then
+    echo "ForgeIt: refs/heads/main is protected; only the merge service may update it" >&2
+    exit 1
+  fi
+done
+exit 0
+"""
 
-def git(cwd, *args, check=True):
-    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+
+def git(cwd, *args, check=True, merge_service=False):
+    env = (
+        {**os.environ, MERGE_ENV: "1"}
+        if merge_service
+        else {k: v for k, v in os.environ.items() if k != MERGE_ENV}
+    )
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, env=env)
     if check and r.returncode:
         raise RuntimeError(f"git {' '.join(args)} failed: {r.stderr.strip() or r.stdout.strip()}")
     return r
+
+
+def safe_branch(name: str) -> str:
+    """Reject branch names that could be read as options or escape refs/heads."""
+    if not BRANCH_RE.match(name or "") or ".." in name or name.endswith((".lock", "/")):
+        raise ValueError(f"unsafe branch name: {name!r}")
+    return name
+
+
+def install_guard(repo: Path) -> None:
+    hook = repo / ".git" / "hooks" / "reference-transaction"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_bytes(GUARD_HOOK.encode("utf-8"))  # LF endings so sh can run it on Windows too
+    hook.chmod(0o755)
 
 
 def room_dir(room_id) -> Path:
@@ -35,6 +77,7 @@ def init_original(room_id, template: Path = SAMPLE):
     git(o, "config", "user.name", "Platform")
     git(o, "add", "-A")
     git(o, "commit", "-q", "-m", "Initial original")
+    install_guard(o)
     return o
 
 
@@ -70,6 +113,7 @@ def init_blank(room_id):
     git(o, "config", "user.name", "Platform")
     git(o, "add", "-A")
     git(o, "commit", "-q", "-m", "Blank original")
+    install_guard(o)
     return o
 
 
@@ -142,10 +186,35 @@ def snapshot(room_id) -> str:
 
 
 def merge_branches(room_id, branches, message):
+    """The Merge Service: the only code path allowed to move main."""
     o = original(room_id)
+    install_guard(o)  # rooms created before the guard existed get it now
     for b in branches:
-        git(o, "merge", "-q", "--no-ff", "-m", f"{message} ({b})", b)
+        git(
+            o,
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            f"{message} ({b})",
+            safe_branch(b),
+            merge_service=True,
+        )
+    return git(o, "rev-parse", "main").stdout.strip()
+
+
+def tag_release(room_id) -> str:
+    """Tag the merged main as release/<n> (rollback points)."""
+    o = original(room_id)
+    n = len(git(o, "tag", "--list", "release/*").stdout.split()) + 1
+    tag = f"release/{n}"
+    git(o, "tag", tag, "main")
+    return tag
+
+
+def head(room_id, branch) -> str:
+    return git(original(room_id), "rev-parse", safe_branch(branch)).stdout.strip()
 
 
 def undo_to(room_id, tag):
-    git(original(room_id), "reset", "-q", "--hard", tag)
+    git(original(room_id), "reset", "-q", "--hard", safe_branch(tag), merge_service=True)

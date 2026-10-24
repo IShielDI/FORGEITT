@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from app.core.db import ex, q
-from app.services import ledger, memory, orchestrator
+from app.services import ledger, memory, observer, orchestrator
 
 TICK_SECONDS = 30
 
@@ -18,6 +18,8 @@ async def _loop() -> None:
             try:
                 ledger.housekeeping(r["id"])
                 memory.sweep(r["id"])
+                if observer.due(r["id"]):
+                    await asyncio.to_thread(observer.observe, r["id"])
                 if orchestrator.pile_due(r["id"]):
                     await asyncio.to_thread(orchestrator.run_referee, r["id"])
             except Exception as e:  # keep the worker alive; one room must not stop the others

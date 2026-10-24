@@ -27,6 +27,7 @@ cd apps/api && pip install -e ".[dev]"
 cd apps/api && alembic upgrade head      # create/upgrade the SQLite schema
 cd apps/api && uvicorn app.main:app --reload
 docker build -t forgeit-agent:latest sandbox/agent   # agent sandbox image
+docker build -t forgeit-mirror:latest sandbox/mirror # mirror image (candidate checks)
 cd apps/api && pytest -q
 cd apps/api && ruff check . && mypy app
 cd apps/web && npm install && npm run dev

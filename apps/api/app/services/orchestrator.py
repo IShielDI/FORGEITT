@@ -6,8 +6,10 @@ from pathlib import Path
 
 from app.core import config
 from app.core.db import ex, now, q, q1
-from app.services import firewall, gitops, graph, memory, referee, tunnel
+from app.services import firewall, gitops, graph, knowledge, memory, referee, tunnel, verify
 from app.services.mirror import new_mirror
+
+LOW_CONFIDENCE = 0.5  # below this, a failure goes to the workspace owner for triage
 
 
 # ---------- failure routing ----------
@@ -35,19 +37,31 @@ def route_failure(room, mirror, tests, journey_reason, journey_ran):
         elif hit:
             part = mp["handler_to_part"].get(hit["handler"])
             why = f"trace: {hit['method']} {hit['path']} -> handler '{hit['handler']}' ({hit['db_writes']} db writes)"
+        confidence = 0.6 if hit and hit["status"] in (404, 405, 422) else 0.65
+    else:
+        confidence = 0.75 if part else 0.0
     if not part and len(mp["parts"]) == 1:
         part = next(iter(mp["parts"]))
         why = why or journey_reason
+        confidence = 0.3  # nothing pointed anywhere: the only part is a guess
     if not part:
         return None
     p = next(x for x in graph.parts(room) if x["name"] == part)
+    retest = graph.affected_by(room, part)
+    # Never certain (TRD R8): below the threshold the workspace owner triages instead
+    owner_row = q1("SELECT name FROM members WHERE room_id=? AND is_owner=1 ORDER BY id", (room,))
+    assigned = p["owner"] if confidence >= LOW_CONFIDENCE else (owner_row or {}).get("name")
     return {
         "part": part,
         "owner": p["owner"],
         "why": why,
         "reason": journey_reason,
         "files": p["paths"],
-        "retest": graph.affected_by(room, part),
+        "retest": retest,
+        "confidence": confidence,
+        "alternates": [x for x in retest if x != part],
+        "assigned_to": assigned,
+        "triage": confidence < LOW_CONFIDENCE,
     }
 
 
@@ -66,6 +80,14 @@ def submit_change(room, change_id):
     if bad:
         _set(change_id, "rejected_firewall", {"firewall": bad})
         return q1("SELECT * FROM changes WHERE id=?", (change_id,))
+    touched = _changed_files(room, ch["branch"])
+    out_of_scope = _scope_violations(room, ch, touched)
+    if out_of_scope:
+        _set(change_id, "rejected_scope", {"scope": out_of_scope})
+        return q1("SELECT * FROM changes WHERE id=?", (change_id,))
+    knowledge.link_change_files(room, change_id, touched)
+    if ch.get("task_id"):
+        knowledge.link(room, "task", ch["task_id"], "change", change_id, "submitted_as")
     queued = (
         []
         if boot
@@ -77,13 +99,16 @@ def submit_change(room, change_id):
             )
         ]
     )
+    # the exact commit being verified; approval is later bound to it (stage 18)
+    ex("UPDATE changes SET verified_sha=? WHERE id=?", (gitops.head(room, ch["branch"]), change_id))
+    profile = verify.profile_of(room)
     m = new_mirror(room)
     try:
         st = m.merge_stack(queued, ch["branch"])
         if not st["ok"]:
             _set(change_id, "conflict", {"conflict": st})
             return q1("SELECT * FROM changes WHERE id=?", (change_id,))
-        t = m.run_tests()
+        t = verify.run(room, m, change_id, profile)
         if boot and not t["tests"]:
             t["passed"] = False
             t["log"] = "bootstrap must include at least one test\n" + t["log"]
@@ -102,6 +127,21 @@ def submit_change(room, change_id):
                     "diff": gitops.diff_stat(room, ch["branch"]),
                 },
                 verdict="needs_human_review",
+            )
+        elif profile == "fast":
+            # fast profile: build, locked and hidden tests only; a human still approves
+            _set(
+                change_id,
+                "passed",
+                {
+                    "tests": t,
+                    "referee": {
+                        "verdict": "not_run",
+                        "reason": "fast profile: the referee does not run; verified by build and tests only",
+                    },
+                    "diff": gitops.diff_stat(room, ch["branch"]),
+                },
+                verdict="tests_only",
             )
         elif blank and not referee.load_journey(room):
             # blank projects have no customer journey yet, so this is tests-only verification; the label says so
@@ -124,6 +164,23 @@ def submit_change(room, change_id):
     finally:
         m.destroy()
     return q1("SELECT * FROM changes WHERE id=?", (change_id,))
+
+
+def _changed_files(room, branch):
+    out = gitops.git(
+        gitops.original(room), "diff", "--name-only", f"main...{gitops.safe_branch(branch)}"
+    ).stdout
+    return [f for f in out.splitlines() if f.strip()]
+
+
+def _scope_violations(room, ch, touched):
+    """Edit scope (per workspace, off by default): a task's change may only touch the files relevant
+    to that task. Computed before this change's own files are linked, so it cannot widen itself."""
+    row = q1("SELECT edit_scope FROM rooms WHERE id=?", (room,)) or {}
+    if row.get("edit_scope") != "task" or not ch.get("task_id"):
+        return []
+    allowed = [f["path"] for f in knowledge.relevant_files(room, ch["task_id"])]
+    return [{"path": f, "allowed": allowed} for f in touched if not knowledge.in_scope(f, allowed)]
 
 
 def _set(change_id, status, evidence_add=None, verdict=None):
@@ -353,22 +410,46 @@ def run_referee(room, force=False):
 
 # ---------- merge / undo ----------
 def approve(room, change_ids, approver, allow_inconclusive=False):
+    """A human approves; the Merge Service merges. Every profile needs this call (no auto-merge)."""
+    if verify.profile_of(room) == "strict":
+        allow_inconclusive = False  # strict: any non-pass referee verdict blocks approval
     cs = [q1("SELECT * FROM changes WHERE id=? AND room_id=?", (i, room)) for i in change_ids]
+    if not cs or any(c is None for c in cs):
+        raise ValueError("unknown change")
     for c in cs:
         ok = c["status"] in ("passed", "bootstrap_review") or (
             allow_inconclusive and c["status"] == "inconclusive"
         )
         if not ok:
             raise ValueError(f"change {c['id']} is '{c['status']}' and cannot be merged")
+        # TRD R4: the approval is bound to the exact commit that was verified
+        if c["verified_sha"] and gitops.head(room, c["branch"]) != c["verified_sha"]:
+            raise ValueError(
+                f"change {c['id']} changed after it was verified (stale commit): re-run the checks"
+            )
+    candidates = {str(c["id"]): c["verified_sha"] or gitops.head(room, c["branch"]) for c in cs}
     tag = gitops.snapshot(room)
-    gitops.merge_branches(room, [c["branch"] for c in cs], f"Approved by {approver}")
+    merged_sha = gitops.merge_branches(room, [c["branch"] for c in cs], f"Approved by {approver}")
+    release = gitops.tag_release(room)
     for c in cs:
         ex("UPDATE changes SET status='merged' WHERE id=?", (c["id"],))
+        if c.get("task_id"):
+            ex("UPDATE tasks SET status='done' WHERE id=?", (c["task_id"],))
     if any(c.get("kind") == "bootstrap" for c in cs):
         ex("UPDATE rooms SET bootstrapped=1 WHERE id=?", (room,))
     mid = ex(
-        "INSERT INTO merges(room_id,change_ids,snapshot,approver,ts) VALUES(?,?,?,?,?)",
-        (room, json.dumps(change_ids), tag, approver, now()),
+        "INSERT INTO merges(room_id,change_ids,snapshot,approver,ts,candidate_sha,merged_sha,release_tag) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        (
+            room,
+            json.dumps(change_ids),
+            tag,
+            approver,
+            now(),
+            json.dumps(candidates),
+            merged_sha,
+            release,
+        ),
     )
     for p in {
         m["part"]
@@ -383,7 +464,7 @@ def approve(room, change_ids, approver, allow_inconclusive=False):
             part=p,
             by_platform=True,
         )
-    return {"merge_id": mid, "snapshot": tag}
+    return {"merge_id": mid, "snapshot": tag, "release": release, "merged_sha": merged_sha}
 
 
 def undo(room, merge_id):

@@ -43,6 +43,7 @@ export default function Home() {
           <select id="t" value={template} onChange={(e) => setTemplate(e.target.value)}>
             <option value="blank">Blank project: the first approved build becomes the original</option>
             <option value="sample">Demo shop: a small store with tests already written</option>
+            <option value="todo">Todo app: a small todo list with tests already written</option>
           </select>
           <p className="err" role="alert">{err}</p>
           <button disabled={busy}>Create workspace</button>

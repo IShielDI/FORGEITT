@@ -208,8 +208,11 @@ def run_task(
     summary=None,
     bootstrap=False,
     role=None,
+    task_id=None,
+    context_md=None,
 ):
-    """role: optional {'key','label','prompt','part'} picked from the workspace's agent catalog."""
+    """role: optional {'key','label','prompt','part'} picked from the workspace's agent catalog.
+    task_id/context_md: a planned task and its context pack (written into the clone as TASK_CONTEXT.md)."""
     ag = q1("SELECT * FROM agents WHERE room_id=? AND name=?", (room_id, agent_name))
     part_name = ag["part"]
     part = (
@@ -224,7 +227,12 @@ def run_task(
         )
         return {"status": "error", "steps": 0, "change_id": None, "final_text": msg}
     ws = gitops.make_workspace(room_id, agent_name, bootstrap=bootstrap)
+    if context_md:
+        (ws / "TASK_CONTEXT.md").write_text(context_md, encoding="utf-8")
+        with open(ws / ".git" / "info" / "exclude", "a", encoding="utf-8") as f:
+            f.write("\nTASK_CONTEXT.md\n")  # context for the agent, never part of its change
     max_steps = max_steps or config.AGENT_STEP_LIMIT
+    deadline = time.monotonic() + config.AGENT_TIME_LIMIT_S
     if bootstrap:
         system = BOOTSTRAP_SYSTEM
     elif part:
@@ -234,10 +242,16 @@ def run_task(
     if role and role.get("prompt"):
         system += f"\n\nYour role in this workspace ({role.get('label') or role.get('key')}): {role['prompt']}"
     contracts = (gitops.original(room_id) / "protected/contracts/contracts.json").read_text()
-    package = (
-        f"TASK:\n{task}\n\nCONTRACTS:\n{contracts}\n\nSHARED MEMORY (check, don't trust):\n"
-        + "\n".join(memory.excerpts(room_id, part_name))
-    )
+    if context_md:
+        package = (
+            f"TASK:\n{task}\n\nCONTEXT PACK (also in TASK_CONTEXT.md; check, don't trust):\n"
+            f"{context_md}\n\nPROJECT CONTRACTS FILE:\n{contracts}"
+        )
+    else:
+        package = (
+            f"TASK:\n{task}\n\nCONTRACTS:\n{contracts}\n\nSHARED MEMORY (check, don't trust):\n"
+            + "\n".join(memory.excerpts(room_id, part_name))
+        )
     messages = [{"role": "user", "content": package}]
     transcript, models = [], set()
     status, steps, final_text = "running", 0, ""
@@ -264,6 +278,9 @@ def run_task(
         if steps >= max_steps:
             status = "paused_steps"
             break  # about 40 steps: pause and ask a human
+        if time.monotonic() > deadline:
+            status = "paused_time"
+            break  # wall-clock limit for one run
         # --- choose key / provider and check the budget covers a small buffer ---
         model = ag["backup_model"] if ag["using_backup"] and ag["backup_model"] else ag["model"]
         call_provider, loan_id, key_owner = provider, None, None
@@ -273,7 +290,10 @@ def run_task(
                 status = "paused_budget"
                 break  # person picks: loan, backup model, or pause
             key_owner, loan_id = choice
-            call_provider = AnthropicProvider(ledger.get_secret(key_owner), model)
+            secret = (
+                config.ANTHROPIC_API_KEY if key_owner == "house" else ledger.get_secret(key_owner)
+            )
+            call_provider = AnthropicProvider(secret, model)
         # --- call with an output cap, retrying overloads and rate limits ---
         reply = None
         for attempt in range(4):
@@ -321,6 +341,7 @@ def run_task(
             reply.usage.cache_read,
             reply.usage.cache_write,
             loan_id,
+            source="house" if key_owner == "house" else None,
         )
         if m["checkpoint"]:
             cp = q1(
@@ -420,7 +441,7 @@ def run_task(
     out = {"status": status, "steps": steps, "change_id": None, "final_text": final_text}
     events.emit(room_id, agent_name, "ended", {"status": status, "steps": steps})
     if status == "done":
-        gitops.commit_workspace(ws, summary or task[:72])
+        sha = gitops.commit_workspace(ws, summary or task[:72])
         branch = gitops.fetch_branch(room_id, ws, agent_name)
         memory.add(
             room_id,
@@ -431,7 +452,7 @@ def run_task(
             by_platform=True,
         )
         cid = ex(
-            "INSERT INTO changes(room_id,agent,member_id,branch,summary,status,model,steps,created,kind) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO changes(room_id,agent,member_id,branch,summary,status,model,steps,created,kind,task_id,commit_sha) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 room_id,
                 agent_name,
@@ -443,6 +464,8 @@ def run_task(
                 steps,
                 now(),
                 "bootstrap" if bootstrap else "normal",
+                task_id,
+                sha,
             ),
         )
         out["change_id"] = cid

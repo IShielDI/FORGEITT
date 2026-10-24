@@ -49,6 +49,12 @@ rooms = _table(
     Column("created", Float),
     Column("mode", Text, server_default=text("'sample'")),  # "sample" (demo shop) or "blank"
     Column("slug", Text),  # display label only; never a credential and never used to join
+    Column("allowed_providers", Text),  # JSON list, e.g. ["claude","mock"]; NULL = every provider
+    Column("observer_cursor", Integer, server_default=text("0")),  # last chat message observed
+    Column("verification_profile", Text),  # fast | standard | strict; NULL = VERIFICATION_PROFILE
+    Column(
+        "edit_scope", Text, server_default=text("'off'")
+    ),  # off | task: edits limited to relevant files
     Column("bootstrapped", Integer, server_default=text("1")),
 )
 
@@ -119,6 +125,7 @@ ledger = _table(
     Column("cost", Float),
     Column("loan_id", Integer),
     Column("ts", Float),
+    Column("source", Text, server_default=text("'own'")),  # own | loan | house (who pays)
 )
 
 requests = _table(
@@ -208,6 +215,12 @@ changes = _table(
     Column("verdict", Text),
     Column("ready_at", Float),
     Column("kind", Text, server_default=text("'normal'")),  # "normal" or "bootstrap"
+    Column("task_id", Integer),  # planned task this change implements (stage 13)
+    Column("commit_sha", Text),  # head of the change's branch when it was submitted (stage 14)
+    Column("handoff", Text),  # JSON handoff summary (stage 14)
+    Column(
+        "verified_sha", Text
+    ),  # branch head the checks ran on; approval is bound to it (stage 18)
 )
 
 merges = _table(
@@ -219,6 +232,9 @@ merges = _table(
     Column("approver", Text),
     Column("ts", Float),
     Column("undone", Integer, server_default=text("0")),
+    Column("candidate_sha", Text),  # JSON {change_id: verified commit} the approval was bound to
+    Column("merged_sha", Text),  # main after the merge
+    Column("release_tag", Text),  # release/<n>
 )
 
 agents = _table(
@@ -271,6 +287,117 @@ referee_runs = _table(
     Column("ts", Float),
     Column("runner", Text),
     Column("steps", Integer),
+)
+
+messages = _table(
+    "messages",
+    _id(),
+    _room(),
+    Column("member_id", Integer),
+    Column("body", Text),  # untrusted chat text: never rendered as HTML, validated before prompts
+    Column("ts", Float),
+)
+
+spec_items = _table(
+    "spec_items",
+    _id(),
+    _room(),
+    Column("kind", Text),  # requirement | decision | suggestion | question
+    Column("text", Text),
+    Column(
+        "status", Text, server_default=text("'proposed'")
+    ),  # proposed|confirmed|rejected|superseded
+    Column("source_message_ids", Text, server_default=text("'[]'")),  # JSON list of message ids
+    Column("confidence", Float),
+    Column("version", Integer, server_default=text("1")),
+    Column("supersedes_id", Integer),  # previous version of the same item (append-only edits)
+    Column("created_by", Integer),  # NULL = proposed by the observer agent
+    Column("confirmed_by", Integer),  # always a human
+    Column("created", Float),
+    Column("decided", Float),
+)
+
+spec_versions = _table(
+    "spec_versions",
+    _id(),
+    _room(),
+    Column("version", Integer),
+    Column("snapshot", Text),  # JSON: the confirmed items at this version
+    Column("created_by", Integer),
+    Column("created", Float),
+    UniqueConstraint("room_id", "version"),
+)
+
+tasks = _table(
+    "tasks",
+    _id(),
+    _room(),
+    Column("key", Text),  # short id from the plan, used for dependencies
+    Column("title", Text),
+    Column("description", Text),
+    Column("component", Text),
+    Column("depends_on", Text, server_default=text("'[]'")),  # JSON list of task keys
+    Column("suggested_owner", Text),
+    Column("owner_member_id", Integer),
+    Column(
+        "status", Text, server_default=text("'proposed'")
+    ),  # proposed|approved|in_progress|submitted|done
+    Column(
+        "spec_item_ids", Text, server_default=text("'[]'")
+    ),  # requirements/decisions it implements
+    Column("contract_ids", Text, server_default=text("'[]'")),  # pinned contract versions
+    Column("plan_version", Integer, server_default=text("1")),
+    Column("created", Float),
+)
+
+contracts = _table(
+    "contracts",
+    _id(),
+    _room(),
+    Column("kind", Text),  # api | schema | type
+    Column("name", Text),
+    Column("content", Text),
+    Column("version", Integer, server_default=text("1")),
+    Column("status", Text, server_default=text("'proposed'")),  # proposed|approved|superseded
+    Column("spec_item_ids", Text, server_default=text("'[]'")),
+    Column("created_by", Integer),
+    Column("created", Float),
+    UniqueConstraint("room_id", "name", "version"),
+)
+
+knowledge_links = Table(
+    "knowledge_links",
+    metadata,
+    _id(),
+    _room(),
+    Column(
+        "src_type", Text
+    ),  # requirement|decision|suggestion|question|contract|task|change|commit|failure
+    Column("src_id", Text),
+    Column("dst_type", Text),
+    Column("dst_id", Text),
+    Column("relation", Text),
+    Column("version", Integer, server_default=text("1")),
+    Column("created_by", Integer),
+    Column("created", Float),
+    Index("ix_knowledge_links_src", "room_id", "src_type", "src_id"),
+    Index("ix_knowledge_links_dst", "room_id", "dst_type", "dst_id"),
+    sqlite_autoincrement=True,
+)
+
+hidden_tests = _table(
+    "hidden_tests",
+    _id(),
+    _room(),
+    Column(
+        "filename", Text
+    ),  # the source lives in the room's holdout folders, never in the database
+    Column("author_id", Integer),
+    Column("approved_by", Integer),  # must be a different person than the author
+    Column("status", Text, server_default=text("'draft'")),  # draft | approved | retired
+    Column("created", Float),
+    Column("approved_at", Float),
+    UniqueConstraint("room_id", "filename"),
 )
 
 ROOM_SCOPED = sorted(t.name for t in metadata.sorted_tables if "room_id" in t.c)

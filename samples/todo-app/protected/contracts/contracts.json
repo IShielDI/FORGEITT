@@ -1,0 +1,6 @@
+{
+  "add": "POST /todos {title} -> 303 to /; the todo is saved with done=0",
+  "done": "POST /todos/{id}/done -> 303 to /; sets done=1; 404 for an unknown id",
+  "list_api": "GET /api/todos -> [{id, title, done}] ordered by id",
+  "page": "GET / -> the todos in order with a Done button each"
+}

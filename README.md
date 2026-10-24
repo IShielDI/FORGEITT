@@ -12,11 +12,12 @@ ForgeIt runs the whole team loop in one place:
 1. **Discuss.** Create a workspace, invite teammates with single-use links, and chat as a team.
 2. **Capture.** An observer agent turns the conversation into a living spec. A suggestion becomes a decision only after a human confirms it.
 3. **Plan.** The platform proposes tasks, owners, dependencies, and shared contracts (API shapes, schemas, types) before anyone writes code.
-4. **Build in parallel.** Each teammate's coding agent works in an isolated Docker sandbox on its own clone and branch, with a task-scoped context pack. Agents never hold model keys. They reach models only through the platform's model proxy, which enforces each member's credit budget.
-5. **Verify independently.** Submitted work is combined in a mirror build and checked by real commands: build, locked tests, hidden tests (written by a human and never visible to agents), lint, and contract checks. The verdict comes from exit codes, not from what an agent claims.
-6. **Referee.** A browser agent (TinyFish) drives the running candidate through user journeys. Only a `pass` verdict counts as a pass.
-7. **Route failures.** Failures go to the likely owner with evidence and a confidence level, not blame.
-8. **Merge with a human gate.** A human approves every merge, in every verification profile. Every merge is snapshotted and tagged so it can be undone.
+4. **See the project map.** A Graph tab shows requirements, decisions, contracts, tasks, parts, files, changes and failures as a linked graph, Obsidian-style. Each agent gets only the slice connected to its task: its relevant files and linked items. Optionally, its edits can be limited to those files.
+5. **Build in parallel.** Each teammate's coding agent works in an isolated Docker sandbox on its own clone and branch, with a task-scoped context pack. Agents never hold model keys. They reach models only through the platform's model proxy, which enforces each member's credit budget.
+6. **Verify independently.** Submitted work is combined in a mirror build and checked by real commands: build, locked tests, hidden tests (written by a human and never visible to agents), lint, and contract checks. The verdict comes from exit codes, not from what an agent claims.
+7. **Referee.** A browser agent (TinyFish) drives the running candidate through user journeys. Only a `pass` verdict counts as a pass.
+8. **Route failures.** Failures go to the likely owner with evidence and a confidence level, not blame.
+9. **Merge with a human gate.** A human approves every merge, in every verification profile. Every merge is snapshotted and tagged so it can be undone.
 
 ```
 Chat -> Observer -> Spec (human-confirmed) -> Planner -> Tasks + Contracts
@@ -28,6 +29,21 @@ Chat -> Observer -> Spec (human-confirmed) -> Planner -> Tasks + Contracts
 
 ## Stack
 FastAPI (Python 3.11), SQLAlchemy 2, SQLite (WAL mode), Next.js (JavaScript), Docker sandboxes behind an internal network, TinyFish referee, Gmail SMTP for invites, and one provider adapter (Claude first, then OpenAI-compatible providers, plus `mock` and Ollama for tests).
+
+## Architecture
+```mermaid
+flowchart LR
+  B[Browser: Next.js] -- HTTP / WebSocket --> API[FastAPI backend]
+  API --> CHAT[Chat] --> OBS[Observer LLM] --> SPEC[Spec: humans confirm]
+  SPEC --> PLAN[Planner LLM: tasks + contracts] --> KN[Knowledge links + context packs]
+  KN --> RUN[Agent runner] -- tool commands only --> SB[(forgeit-agent container: no network, no keys)]
+  RUN -- model calls, keys, budget --> LLM[(Provider adapter + credits ledger)]
+  RUN --> SUB[Submission + handoff] --> MIR[(forgeit-mirror: build, locked + hidden tests, lint, contracts, scans)]
+  MIR --> REF[Referee: TinyFish via tunnel] --> ROUTE[Failure router: confidence]
+  REF --> APP[Human approval: verified commit] --> MERGE[Merge Service: only writer of main, release tag, undo]
+  API --- DB[(SQLite: WAL)]
+```
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the decisions in [docs/adr/](docs/adr/).
 
 ## Repository Layout
 ```
@@ -67,6 +83,7 @@ The project is built one stage at a time. See [BUILD_PROMPTS.md](BUILD_PROMPTS.m
 Copy `.env.example` to `.env` (never commit `.env`). Then:
 ```
 docker build -t forgeit-agent:latest sandbox/agent      # the agents' sandbox (see Isolation)
+docker build -t forgeit-mirror:latest sandbox/mirror    # the mirror where candidate code is checked
 
 cd apps/api && python -m venv .venv && .venv/Scripts/activate   # macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev]"
@@ -78,7 +95,7 @@ cd apps/web && npm install && npm run build && npm start   # http://localhost:30
 ```
 Open http://localhost:3000 and start a workspace. Each person gets one login token, shown once. Enter the workspace, paste your Claude key and a budget, pick an agent and give it a task. The demo shop (`samples/shop`) comes with locked tests and hidden tests (`samples/shop-holdout`). A blank project begins with a **bootstrap**: the agent writes a short spec, the tests and the first app, and a human approves it to make it the locked original.
 
-To run real agents from a script with capped spend: `ANTHROPIC_API_KEY=... python scripts/live_demo.py "<task>" "<task>"`.
+Demos: `bash scripts/demo.sh` runs the scripted end-to-end test and the finale loop offline (no keys). `python scripts/finale_demo.py --live` runs the finale loop with a real Claude agent (`ANTHROPIC_API_KEY`, spend capped by `BUDGET`). See [docs/DEMO.md](docs/DEMO.md).
 
 Contributors and AI agents should read [AGENTS.md](AGENTS.md) first.
 
@@ -89,33 +106,36 @@ The machine that runs the backend and Docker is the host; everyone else only nee
 - Agent commands run in **Docker** with no network, no keys, all capabilities dropped, memory/CPU/PID limits, only their own clone mounted, and `protected/` (locked tests and contracts) mounted read-only. If Docker or the `forgeit-agent` image is missing, the platform **refuses** to run a real model's commands. `ALLOW_UNSAFE_SANDBOX=true` overrides that on a throwaway machine only; it is not a security boundary.
 - Model calls are made by the backend, never from inside the sandbox: keys stay on the host, encrypted at rest (Fernet).
 - The database and encryption key live in `PLATFORM_STATE`, a sibling of the workspace data, never inside or above it.
-- The mirror, where agent-written code and the hidden tests run, gets a minimal environment (no keys), **but it runs on the host**. Code running there could read the hidden tests beside it. Containerising the mirror is open work.
+- The mirror runs the candidate's build, tests, lint and contract checks in fresh `forgeit-mirror` containers with no network and no keys, and runs the candidate app in its own container for the referee. Without the image it falls back to the host and every result says `mirror: host (not isolated)`.
 - The bash firewall (blocks `..`, platform paths, edits of protected files) is a speed bump. The real wall is the commit-time check that rejects any change to `protected/`.
 - Without a TinyFish key and a public address, the referee reports **not run**; it never pretends. `REFEREE_STANDIN=true` enables an offline stand-in for rehearsals, and its verdicts are labelled as not TinyFish's.
 
 ### Verified vs not
-Verified by the offline test suite (scripted stand-in agents, a fake TinyFish server):
-- logins scoped per workspace; keys encrypted and never echoed
-- the agent catalog, and the live activity stream with stop
-- bootstrap → review → approval → locked original
-- firewall blocks, and hidden tests catching a hard-coded answer
-- the referee's "not run" honesty
-- the TinyFish client protocol: `error.category`, 402, `max_steps`, `capture_config`
-- ledger, loans and checkpoints; merge and undo (owner only)
+**Verified offline** (about 230 tests with mock models, scripted agents and a fake TinyFish server):
+- invites, roles and access control; chat over WebSocket
+- observer → spec confirm/reject/edit (append-only) → planner (acyclic, pinned contracts) → knowledge links → context packs
+- per-task start with `TASK_CONTEXT.md`, the handoff from the diff, verification checks with exit codes and logs, profiles, secret scan
+- failure routing with confidence and triage; the protected main guard; approval bound to the verified commit; release tags and undo
+- the house key caps; the todo-app end-to-end flow
 
-**Not yet verified** (needs your keys, network or a real run on the host):
-- real Claude calls
-- the real TinyFish API, its screenshots and recording
-- a tunnel reaching TinyFish's cloud browser
-- a full agent run inside the Docker sandbox
+**Verified on the host** (Windows, Docker Desktop):
+- the agent sandbox (non-root, no network, read-only `protected/`)
+- the mirror containers running the finale loop end to end, using the offline referee stand-in
+
+**Not yet verified** (needs keys or network):
+- real Claude agent runs
+- the real TinyFish API, its evidence, and the tunnel
+- Gmail sending
+- pip-audit dependency scans
 - Anthropic's terms for lending a key
 
-Per AGENTS.md, nothing in that second list should be described as working until it passes the real-run test.
+Per AGENTS.md, do not describe these as working until the real-run test passes.
 
 ## Documentation
 - [Product Requirements (PRD)](docs/PRD.md)
 - [Technical Requirements (TRD)](docs/TRD.md)
-- [Architecture](docs/ARCHITECTURE.md)
+- [Architecture](docs/ARCHITECTURE.md) and [ADRs](docs/adr/)
+- [Demo guide](docs/DEMO.md) · [Hidden tests threat model](docs/security/hidden-tests-threat-model.md) · [Contributing](CONTRIBUTING.md)
 - [Product vision (source)](docs/source/product-vision.docx)
 
 ## License

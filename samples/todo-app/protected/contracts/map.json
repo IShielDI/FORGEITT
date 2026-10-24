@@ -1,0 +1,11 @@
+{
+  "parts": {
+    "frontend": {"paths": ["app/main.py#pages"], "owner": "riya", "depends_on": ["backend"]},
+    "backend": {"paths": ["app/main.py"], "owner": "aman", "depends_on": ["database"]},
+    "database": {"paths": ["app/db.py"], "owner": "aman", "depends_on": []},
+    "qa": {"paths": ["protected/"], "owner": "riya", "depends_on": []}
+  },
+  "handler_to_part": {"add": "backend", "done": "backend", "home": "frontend", "api_todos": "backend"},
+  "test_to_part": {"test_todos.py": "backend", "test_hidden_todos.py": "backend"},
+  "journeys": {"todo_journey": ["frontend", "backend", "database"]}
+}

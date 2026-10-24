@@ -15,6 +15,8 @@ os.environ["PLATFORM_STATE"] = _STATE
 os.environ["DATABASE_URL"] = f"sqlite:///{Path(_STATE, 'forgeit.db').as_posix()}"
 os.environ["REQUIRE_AUTH"] = "0"
 os.environ["LLM_PROVIDER"] = "mock"
+os.environ["VERIFICATION_PROFILE"] = "standard"
+os.environ["MIRROR_SANDBOX"] = "host"  # CI has no Docker image; docker mode has its own test
 for _secret in ("TINYFISH_API_KEY", "ANTHROPIC_API_KEY", "PUBLIC_TUNNEL_URL", "MIRROR_PUBLIC_URL"):
     os.environ.pop(_secret, None)
 

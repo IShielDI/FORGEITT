@@ -62,3 +62,18 @@ def writer(request: Request, rid: int, claimed: int | None = None):
     if m and role_of(m) == "viewer":
         raise HTTPException(403, "viewers are read-only in this workspace")
     return m
+
+
+def member_from_token(rid: int, token: str | None, claimed: int | None = None):
+    """For WebSockets (no Request headers in browsers): resolve ?token= (or ?member= when logins are off)."""
+    if not config.REQUIRE_AUTH:
+        return (
+            q1("SELECT * FROM members WHERE id=? AND room_id=?", (claimed, rid))
+            if claimed
+            else None
+        )
+    return (
+        q1("SELECT * FROM members WHERE room_id=? AND token_hash=?", (rid, hash_token(token)))
+        if token
+        else None
+    )

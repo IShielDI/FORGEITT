@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core import config, db
 from app.core.config import get_settings
-from app.routers import health, rooms
+from app.routers import chat, health, plan, rooms, spec
 from app.workers.background import lifespan
 
 
@@ -22,6 +22,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(health.router)
     app.include_router(rooms.router)
+    app.include_router(chat.router)
+    app.include_router(spec.router)
+    app.include_router(plan.router)
     return app
 
 

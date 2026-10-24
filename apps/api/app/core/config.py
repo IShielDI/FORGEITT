@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     artifact_path: Path = Path("./data/artifacts")
     sample_project_path: Path = Path("./samples/shop")
     sample_holdout_path: Path = Path("./samples/shop-holdout")
+    todo_project_path: Path = Path("./samples/todo-app")
+    todo_holdout_path: Path = Path("./samples/todo-app-holdout")
 
     # Providers (Claude first)
     llm_provider: LLMProvider = "mock"
@@ -94,8 +96,12 @@ class Settings(BaseSettings):
 
     # Agents and sandbox
     agent_step_limit: int = 40
+    agent_time_limit_s: int = 1800  # wall-clock limit for one agent run
     agent_sandbox: SandboxMode = "auto"
     agent_image: str = "forgeit-agent:latest"
+    # Where the mirror runs candidate code: auto (Docker if the image exists) | docker | host
+    mirror_sandbox: Literal["auto", "docker", "host"] = "auto"
+    mirror_image: str = "forgeit-mirror:latest"
     # Plain subprocess is NOT a security boundary; only for a throwaway machine with no secrets.
     allow_unsafe_sandbox: bool = False
     pile_size: int = 3
@@ -127,6 +133,8 @@ class Settings(BaseSettings):
         "artifact_path",
         "sample_project_path",
         "sample_holdout_path",
+        "todo_project_path",
+        "todo_holdout_path",
     )
     @classmethod
     def _absolute_paths(cls, value: Path) -> Path:
@@ -154,6 +162,11 @@ DATA: Path = _settings.git_storage_path
 STATE: Path = _settings.platform_state
 SAMPLE: Path = _settings.sample_project_path
 SAMPLE_HOLDOUT: Path = _settings.sample_holdout_path
+# starting points a workspace can be created from: (project, its hidden tests)
+TEMPLATES: dict[str, tuple[Path, Path]] = {
+    "sample": (SAMPLE, SAMPLE_HOLDOUT),
+    "todo": (_settings.todo_project_path, _settings.todo_holdout_path),
+}
 DATA.mkdir(parents=True, exist_ok=True)
 STATE.mkdir(parents=True, exist_ok=True)
 
@@ -183,3 +196,19 @@ SMTP_USER: str = _settings.smtp_user or ""
 SMTP_APP_PASSWORD: str = (
     _settings.smtp_app_password.get_secret_value() if _settings.smtp_app_password else ""
 )
+LLM_PROVIDER: str = _settings.llm_provider
+ANTHROPIC_API_KEY: str = (
+    _settings.anthropic_api_key.get_secret_value() if _settings.anthropic_api_key else ""
+)
+OPENAI_COMPAT_BASE_URL: str = (_settings.openai_compat_base_url or "").rstrip("/")
+OPENAI_COMPAT_API_KEY: str = (
+    _settings.openai_compat_api_key.get_secret_value() if _settings.openai_compat_api_key else ""
+)
+OLLAMA_BASE_URL: str = _settings.ollama_base_url.rstrip("/")
+AGENT_TIME_LIMIT_S: int = _settings.agent_time_limit_s
+MIRROR_SANDBOX: str = _settings.mirror_sandbox
+MIRROR_IMAGE: str = _settings.mirror_image
+VERIFICATION_PROFILE: str = _settings.verification_profile
+HOUSE_KEY_ENABLED: bool = _settings.house_key_enabled
+HOUSE_CAP_WORKSPACE_USD: float | None = _settings.house_cap_workspace_usd
+HOUSE_CAP_PERSON_USD: float | None = _settings.house_cap_person_usd

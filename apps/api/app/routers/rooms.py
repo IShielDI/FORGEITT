@@ -15,13 +15,17 @@ from app.core import auth, config
 from app.core.db import ex, now, q, q1
 from app.services import (
     agent_runner,
+    context,
     events,
     gitops,
     graph,
+    handoff,
+    hidden_tests,
     invites,
     ledger,
     memory,
     orchestrator,
+    planner,
     referee,
 )
 
@@ -191,8 +195,8 @@ DEFAULT_ROLES = {
 
 @router.post("/api/rooms")
 def create_room(body: RoomIn):
-    if body.template not in ("sample", "blank"):
-        raise HTTPException(400, "template must be 'sample' or 'blank'")
+    if body.template not in ("blank", *config.TEMPLATES):
+        raise HTTPException(400, f"template must be one of: blank, {', '.join(config.TEMPLATES)}")
     if not body.members:
         raise HTTPException(400, "a room needs at least one member")
     blank = body.template == "blank"
@@ -205,8 +209,9 @@ def create_room(body: RoomIn):
         gitops.init_blank(rid)
         h.mkdir(parents=True, exist_ok=True)  # no hold-out tests until a human writes them
     else:
-        gitops.init_original(rid)
-        shutil.copytree(config.SAMPLE_HOLDOUT, h)
+        project, holdout = config.TEMPLATES[body.template]
+        gitops.init_original(rid, project)
+        shutil.copytree(holdout, h)
     mids, tokens = {}, {}
     for i, m in enumerate(body.members):
         tok = auth.new_token()
@@ -463,7 +468,7 @@ def _guard_blank(rid):
         )
 
 
-def _execute(rid, name, task, role, bootstrap):
+def _execute(rid, name, task, role, bootstrap, task_id=None, context_md=None):
     """Run one agent task to the end, queue its change for checking, and tell the live stream how it went."""
     try:
         res = agent_runner.run_task(
@@ -473,8 +478,16 @@ def _execute(rid, name, task, role, bootstrap):
             summary=("Bootstrap: " if bootstrap else "") + task[:100],
             bootstrap=bootstrap,
             role=role,
+            task_id=task_id,
+            context_md=context_md,
         )
         if res["change_id"]:
+            try:
+                res["handoff"] = handoff.generate(res["change_id"], res["final_text"])
+            except Exception as e:  # a missing summary must not lose the change
+                print("handoff failed:", type(e).__name__)
+            if task_id:
+                ex("UPDATE tasks SET status='submitted' WHERE id=?", (task_id,))
             res["change"] = orchestrator.submit_change(rid, res["change_id"])
         events.emit(
             rid,
@@ -495,15 +508,16 @@ def _execute(rid, name, task, role, bootstrap):
         raise
 
 
-def _start(rid, name, task, role, bootstrap, wait):
+def _start(rid, name, task, role, bootstrap, wait, task_id=None, context_md=None):
     ag = q1("SELECT status FROM agents WHERE room_id=? AND name=?", (rid, name))
     if ag["status"] == "running":
         raise HTTPException(409, "this agent is already working on a task: wait for it or stop it")
     ex("UPDATE agents SET status='running' WHERE room_id=? AND name=?", (rid, name))
     if wait:
-        return _execute(rid, name, task, role, bootstrap)
+        return _execute(rid, name, task, role, bootstrap, task_id, context_md)
     threading.Thread(
-        target=lambda: _safe_exec(rid, name, task, role, bootstrap), daemon=True
+        target=lambda: _safe_exec(rid, name, task, role, bootstrap, task_id, context_md),
+        daemon=True,
     ).start()
     return {"accepted": True, "agent": name}
 
@@ -655,15 +669,42 @@ def get_journey(rid: int, request: Request):
 
 @router.post("/api/rooms/{rid}/holdout")
 def add_holdout(rid: int, body: HoldoutIn, request: Request):
-    """A human adds a hidden test. It lives in the room's hold-out folder, runs only in the mirror, never reaches an agent."""
+    """A teammate drafts a hidden test (stage 22). It runs in the mirror only after a second person
+    approves it, and it never reaches an agent, a log or the UI."""
+    m = _writer(request, rid)
+    try:
+        return hidden_tests.submit(rid, m["id"] if m else None, body.filename, body.content)
+    except hidden_tests.HiddenTestError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/api/rooms/{rid}/holdout/{filename}/approve")
+def approve_holdout(rid: int, filename: str, request: Request):
+    m = _writer(request, rid)
+    try:
+        return hidden_tests.approve(
+            rid, filename, m["id"] if m else None, enforce_two_people=config.REQUIRE_AUTH
+        )
+    except hidden_tests.HiddenTestError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/api/rooms/{rid}/holdout/{filename}/retire")
+def retire_holdout(rid: int, filename: str, request: Request):
     _room(rid)
-    auth.owner(request, rid) if config.REQUIRE_AUTH else None
-    if not re.fullmatch(r"test_[A-Za-z0-9_]{1,60}\.py", body.filename):
-        raise HTTPException(400, "file name must look like test_something.py")
-    d = gitops.room_dir(rid) / "holdout"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / body.filename).write_text(body.content)
-    return {"saved": body.filename}
+    if config.REQUIRE_AUTH:
+        auth.owner(request, rid)
+    try:
+        return hidden_tests.retire(rid, filename)
+    except hidden_tests.HiddenTestError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.get("/api/rooms/{rid}/holdout/drafts")
+def holdout_workflow(rid: int, request: Request):
+    """Authors, approvers, status and test names. Never the test source."""
+    _who(request, rid)
+    return hidden_tests.listing(rid)
 
 
 @router.get("/api/rooms/{rid}/holdout")
@@ -890,5 +931,207 @@ def accept_invite(token: str, body: AcceptIn):
         return invites.accept(token, body.name, body.email)
     except invites.InviteError as e:
         raise HTTPException(_INVITE_STATUS[e.code], str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# ---------- model providers per workspace (stage 6) ----------
+class ProvidersIn(BaseModel):
+    allowed: list[str]
+
+
+@router.get("/api/rooms/{rid}/providers")
+def get_providers(rid: int, request: Request):
+    from app.llm.client import allowed_providers
+
+    _who(request, rid)
+    return {"allowed": allowed_providers(rid), "default": config.LLM_PROVIDER}
+
+
+@router.put("/api/rooms/{rid}/providers")
+def set_providers(rid: int, body: ProvidersIn, request: Request):
+    from app.llm.client import PROVIDERS
+
+    _room(rid)
+    if config.REQUIRE_AUTH:
+        auth.owner(request, rid)
+    bad = [p for p in body.allowed if p not in PROVIDERS]
+    if bad or not body.allowed:
+        raise HTTPException(
+            400, f"allowed providers must be a non-empty subset of {', '.join(PROVIDERS)}"
+        )
+    ex(
+        "UPDATE rooms SET allowed_providers=? WHERE id=?",
+        (json.dumps(sorted(set(body.allowed))), rid),
+    )
+    return {"allowed": sorted(set(body.allowed))}
+
+
+# ---------- planned tasks: start in a sandbox, submit (stages 13-14) ----------
+class TaskStartIn(BaseModel):
+    agent: str = "builder"
+    model: str | None = None
+    member_id: int | None = None
+
+
+def _planned_task(task_id):
+    try:
+        return planner.task(task_id)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/api/tasks/{task_id}/start")
+def start_task(task_id: int, body: TaskStartIn, request: Request, wait: bool = False):
+    """Run the caller's agent on a planned task: own per-task clone, TASK_CONTEXT.md, no keys.
+    Only after the plan and the task's contracts are approved; only the task's owner (or the
+    workspace owner) may start it."""
+    t = _planned_task(task_id)
+    rid = t["room_id"]
+    m = _writer(request, rid, body.member_id)
+    if not m:
+        raise HTTPException(400, "say who you are (member_id)")
+    if t["owner_member_id"] not in (None, m["id"]) and not m["is_owner"]:
+        raise HTTPException(403, "this task belongs to another member")
+    ok, why = planner.can_start(task_id)
+    if not ok:
+        raise HTTPException(409, why)
+    _guard_blank(rid)
+    e = q1("SELECT * FROM agent_catalog WHERE room_id=? AND key=?", (rid, body.agent))
+    if not e:
+        raise HTTPException(404, "that agent is not in this workspace's catalog")
+    _known_model(body.model)
+    ag = _instance(rid, m)
+    ex(
+        "UPDATE agents SET part=?, model=?, role=? WHERE id=?",
+        (e["part"], body.model or e["model"] or config.DEFAULT_MODEL, e["key"], ag["id"]),
+    )
+    ex("UPDATE tasks SET status='in_progress', owner_member_id=? WHERE id=?", (m["id"], task_id))
+    role = {"key": e["key"], "label": e["label"], "prompt": e["role_prompt"], "part": e["part"]}
+    pack = context.build(task_id)
+    if (q1("SELECT edit_scope FROM rooms WHERE id=?", (rid,)) or {}).get("edit_scope") == "task":
+        pack["markdown"] += (
+            "\n## Edit scope is ON\nOnly the files under 'Relevant files' may change. Any other change"
+            " is rejected at submission: if you need another file, file a contract change request.\n"
+        )
+    text = t["title"] + "\n\n" + (t["description"] or "")
+    return _start(rid, ag["name"], text, role, False, wait, task_id, pack["markdown"])
+
+
+@router.post("/api/tasks/{task_id}/submit")
+def submit_task(task_id: int, request: Request):
+    """Send the task's latest change through the mirror and checks again (e.g. after a fix)."""
+    t = _planned_task(task_id)
+    _writer(request, t["room_id"])
+    ch = q1("SELECT id FROM changes WHERE task_id=? ORDER BY id DESC LIMIT 1", (task_id,))
+    if not ch:
+        raise HTTPException(409, "this task has no change yet: start it first")
+    return orchestrator.submit_change(t["room_id"], ch["id"])
+
+
+# ---------- verification profile (stage 19) and failures (stage 17) ----------
+class ProfileIn(BaseModel):
+    profile: str
+
+
+@router.put("/api/rooms/{rid}/profile")
+def set_profile(rid: int, body: ProfileIn, request: Request):
+    """Owner only. Changes how much verification runs first; a human approves every merge in every profile."""
+    _room(rid)
+    if config.REQUIRE_AUTH:
+        auth.owner(request, rid)
+    if body.profile not in ("fast", "standard", "strict"):
+        raise HTTPException(400, "profile must be fast, standard or strict")
+    ex("UPDATE rooms SET verification_profile=? WHERE id=?", (body.profile, rid))
+    return {"profile": body.profile}
+
+
+class ReassignIn(BaseModel):
+    part: str | None = None
+    owner: str | None = None
+
+
+def _failure(fid):
+    f = q1("SELECT * FROM memory WHERE id=? AND kind='failure'", (fid,))
+    if not f:
+        raise HTTPException(404, "no such failure")
+    f["content"] = json.loads(f["content"] or "{}")
+    return f
+
+
+@router.get("/api/rooms/{rid}/failures")
+def failures(rid: int, request: Request):
+    _who(request, rid)
+    rows = q("SELECT * FROM memory WHERE room_id=? AND kind='failure' ORDER BY id DESC", (rid,))
+    for r in rows:
+        r["content"] = json.loads(r["content"] or "{}")
+    return [r for r in rows if r["content"].get("state") == "failing"]
+
+
+@router.post("/api/failures/{fid}/reassign")
+def reassign_failure(fid: int, body: ReassignIn, request: Request):
+    f = _failure(fid)
+    m = _writer(request, f["room_id"])
+    c = f["content"]
+    if body.part:
+        if not q1("SELECT 1 x FROM parts WHERE room_id=? AND name=?", (f["room_id"], body.part)):
+            raise HTTPException(400, "no such part")
+        c["part"] = body.part
+        c["assigned_to"] = graph.owner_of(f["room_id"], body.part)
+    if body.owner:
+        c["assigned_to"] = body.owner
+    c["reassigned_by"] = _name(m, "member")
+    ex("UPDATE memory SET content=?, part=? WHERE id=?", (json.dumps(c), c.get("part"), fid))
+    return _failure(fid)
+
+
+@router.post("/api/failures/{fid}/resolve")
+def resolve_failure(fid: int, request: Request):
+    f = _failure(fid)
+    m = _writer(request, f["room_id"])
+    c = {**f["content"], "state": "resolved", "resolved_by": _name(m, "member")}
+    ex("UPDATE memory SET content=? WHERE id=?", (json.dumps(c), fid))
+    return _failure(fid)
+
+
+# ---------- referee journeys drafted from approved requirements (stage 21) ----------
+class JourneyApproveIn(BaseModel):
+    goal: str | None = None
+    success_text: str | None = None
+    db_check: str | None = None
+
+
+@router.post("/api/rooms/{rid}/journey/draft")
+def draft_journey(rid: int, request: Request):
+    from app.llm.client import LLMError
+    from app.services import credits, journeys
+
+    _writer(request, rid)
+    try:
+        return journeys.draft(rid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except (LLMError, credits.BudgetExceededError) as e:
+        raise HTTPException(503, f"could not draft a journey: {e}")
+
+
+@router.get("/api/rooms/{rid}/journey/draft")
+def get_journey_draft(rid: int, request: Request):
+    from app.services import journeys
+
+    _who(request, rid)
+    return journeys.load_draft(rid) or {}
+
+
+@router.post("/api/rooms/{rid}/journey/draft/approve")
+def approve_journey_draft(rid: int, body: JourneyApproveIn, request: Request):
+    """Owner only: a person reviews the drafted journey before the referee uses it."""
+    from app.services import journeys
+
+    _room(rid)
+    if config.REQUIRE_AUTH:
+        auth.owner(request, rid)
+    try:
+        return journeys.approve(rid, body.model_dump(exclude_none=True))
     except ValueError as e:
         raise HTTPException(400, str(e))

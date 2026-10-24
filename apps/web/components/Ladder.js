@@ -8,6 +8,7 @@ function rungs(c) {
   const bad = (a) => a.filter((t) => !t.passed);
   const r = ref(c);
   const out = [];
+  if (ev.routed && !r) out.push({ t: "Failure routing", s: "fail", d: "Where the failure most likely comes from", routed: ev.routed });
   if (ev.firewall) out.push({ t: "Firewall", s: "fail", d: "This change touched protected files, so it was rejected: " + ev.firewall.map((f) => f.path).join(", ") });
   else if (ev.conflict) out.push({ t: "Merge", s: "fail", d: `It conflicts with ${ev.conflict.conflict_with}. The owner has to resolve it.` });
   out.push(vis.length ? { t: "Locked tests", s: bad(vis).length ? "fail" : "pass", d: bad(vis).length ? bad(vis).map((t) => t.name).join(", ") + " failed" : `${vis.length} passed` } : { t: "Locked tests", s: ev.firewall || ev.conflict ? "skip" : "wait", d: "Not run yet" });
@@ -45,7 +46,7 @@ export default function Ladder({ rid, id, me, onChanged }) {
             {x.v && <p className="verdict">{x.v}</p>}
             <p>{x.d}</p>
             {x.standin && <p className="err">This was the offline stand-in, not a real browser run. It is not a TinyFish verdict.</p>}
-            {x.routed && <p>Sent to <b>{x.routed.owner || x.routed.part}</b> ({x.routed.part}): {x.routed.why}</p>}
+            {x.routed && <p>Sent to <b>{x.routed.assigned_to || x.routed.owner || x.routed.part}</b> ({x.routed.part}{x.routed.confidence != null ? `, confidence ${Math.round(x.routed.confidence * 100)}%: likely, not certain` : ""}): {x.routed.why}{x.routed.triage ? " · low confidence, so the workspace owner triages it" : ""}</p>}
             {x.t.startsWith("Referee") && vid && <video controls src={vid} onError={(e) => (e.currentTarget.style.display = "none")} />}
           </li>
         ))}
@@ -62,6 +63,9 @@ export default function Ladder({ rid, id, me, onChanged }) {
       </ol>
       <p className="err" role="alert">{err}</p>
       {!!c.attempts?.length && <details><summary>{c.attempts.length} blocked attempt(s) by this agent</summary><ul>{c.attempts.map((a) => <li key={a.id} className="small">{a.action}: <code>{a.path}</code></li>)}</ul></details>}
+      {!!ev.tests?.checks?.length && <details><summary>Checks ({ev.tests.profile || "standard"} profile{ev.tests.isolation ? `, mirror: ${ev.tests.isolation === "docker" ? "isolated container" : "host (not isolated)"}` : ""})</summary>
+        <table><tbody>{ev.tests.checks.map((k) => <tr key={k.name}><td>{k.name.replace(/_/g, " ")}</td><td>{k.status}</td><td className="small"><code>{k.command}</code></td><td className="small">exit {k.exit_code ?? "–"} · {k.duration_ms} ms</td></tr>)}</tbody></table>
+      </details>}
       {ev.diff?.stat && <details open={c.status === "bootstrap_review"}><summary>What changed</summary><pre>{c.status === "bootstrap_review" ? ev.diff.diff : ev.diff.stat}</pre></details>}
     </div>
   );

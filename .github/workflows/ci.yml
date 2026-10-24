@@ -44,7 +44,7 @@ jobs:
         run: pytest -q
 
   web:
-    name: Web (build)
+    name: Web (lint, test, build)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -60,6 +60,12 @@ jobs:
 
       - name: Install
         run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
 
       - name: Build
         run: npm run build

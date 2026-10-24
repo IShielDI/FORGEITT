@@ -1,3 +1,11 @@
+"""The mirror: a throwaway candidate build (main + queued changes + the new change).
+
+Candidate code runs either in a fresh `forgeit-mirror` container (tests with no network, no keys,
+capabilities dropped, resource limits) or, when Docker or the image is missing, on the host with a
+minimal environment. The mode is recorded with every result so nobody mistakes host runs for isolated
+ones. The app's database and traces are read by the platform from the mirror folder.
+"""
+
 import os
 import shutil
 import socket
@@ -11,7 +19,12 @@ from pathlib import Path
 import httpx
 from defusedxml import ElementTree as ET  # junit.xml is written by agent-controlled code
 
+from app.core import config
 from app.services.gitops import git, original, room_dir
+
+CONTAINER_PORT = 8000
+TEST_TIMEOUT_S = 300
+_image_ok: dict[str, bool] = {}
 
 
 def free_port():
@@ -34,10 +47,37 @@ def force_rmtree(path: Path):
         shutil.rmtree(path, onerror=_retry)
 
 
+def _docker_image_ready(image: str) -> bool:
+    if image not in _image_ok:
+        try:
+            _image_ok[image] = bool(shutil.which("docker")) and (
+                subprocess.run(
+                    ["docker", "image", "inspect", image], capture_output=True, timeout=20
+                ).returncode
+                == 0
+            )
+        except Exception:
+            _image_ok[image] = False
+    return _image_ok[image]
+
+
+def isolation_mode() -> str:
+    if config.MIRROR_SANDBOX in ("docker", "host"):
+        return config.MIRROR_SANDBOX
+    return "docker" if _docker_image_ready(config.MIRROR_IMAGE) else "host"
+
+
+def _container_user() -> str:
+    getuid, getgid = getattr(os, "getuid", None), getattr(os, "getgid", None)
+    return f"{getuid()}:{getgid()}" if getuid and getgid else "1000:1000"
+
+
 class Mirror:
     def __init__(self, room_id, path: Path):
         self.room_id, self.path, self.proc, self.port = room_id, path, None, None
         self.db_path = str(path / "mirror.db")
+        self.isolation = isolation_mode()
+        self.container = None
 
     def env(self):
         # Agent-written code runs here: pass it a minimal environment, never the platform's keys or secrets.
@@ -53,6 +93,65 @@ class Mirror:
             "PYTHONPATH": str(self.path),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
+
+    def docker_args(self, argv, network="none", detach=False, publish=None, name=None):
+        """A fresh container with only this mirror folder mounted and no keys in its environment."""
+        a = ["docker", "run", "--rm"]
+        if detach:
+            a += ["-d"]
+        if name:
+            a += ["--name", name]
+        a += [
+            "--network",
+            network,
+            "--user",
+            _container_user(),
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "256",
+            "--memory",
+            "1g",
+            "--cpus",
+            "1",
+            "-v",
+            f"{self.path}:/work",
+            "-w",
+            "/work",
+            "-e",
+            "HOME=/work",
+            "-e",
+            "DB_PATH=/work/mirror.db",
+            "-e",
+            "PYTHONPATH=/work",
+            "-e",
+            "PYTHONDONTWRITEBYTECODE=1",
+        ]
+        if publish:
+            a += ["-p", publish]
+        return [*a, config.MIRROR_IMAGE, *argv]
+
+    def exec(self, argv, timeout=TEST_TIMEOUT_S):
+        """Run one command against the candidate. Returns (exit_code, output, duration_ms)."""
+        t0 = time.monotonic()
+        if self.isolation == "docker":
+            cmd, cwd, env = self.docker_args(argv), None, None
+        else:
+            cmd, cwd, env = (
+                [sys.executable if argv[0] == "python" else argv[0], *argv[1:]],
+                self.path,
+                self.env(),
+            )
+        try:
+            r = subprocess.run(
+                cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout
+            )
+            code, out = r.returncode, (r.stdout + r.stderr)
+        except subprocess.TimeoutExpired:
+            code, out = 124, f"timed out after {timeout}s"
+        return code, out[-20000:], int((time.monotonic() - t0) * 1000)
 
     def holdout_dir(self):
         return room_dir(self.room_id) / "holdout"
@@ -87,12 +186,12 @@ class Mirror:
         if not own.exists() and locked.exists():
             shutil.copy(locked, own)
 
-    def run_tests(self):
-        xml = self.path / "junit.xml"
-        paths = ["protected/tests"] + (["_holdout"] if (self.path / "_holdout").exists() else [])
-        r = subprocess.run(
+    def run_suite(self, label, paths):
+        """One pytest run (its own exit code and junit report). Hidden test sources never leave here."""
+        xml = f"junit-{label}.xml"
+        code, out, ms = self.exec(
             [
-                sys.executable,
+                "python",
                 "-m",
                 "pytest",
                 "-q",
@@ -102,50 +201,88 @@ class Mirror:
                 "protected/pytest.ini",
                 f"--junitxml={xml}",
                 *paths,
-            ],
-            cwd=self.path,
-            env=self.env(),
-            capture_output=True,
-            text=True,
-            timeout=300,
+            ]
         )
         results = []
-        if xml.exists():
-            for tc in ET.parse(xml).getroot().iter("testcase"):
-                fail = tc.find("failure")
-                err = tc.find("error")
-                bad = fail if fail is not None else err
+        if (self.path / xml).exists():
+            for tc in ET.parse(self.path / xml).getroot().iter("testcase"):
+                bad = tc.find("failure") if tc.find("failure") is not None else tc.find("error")
                 results.append(
                     {
                         "name": f"{tc.get('classname', '').split('.')[-1]}::{tc.get('name')}",
-                        "hidden": "_holdout" in (tc.get("classname") or ""),
+                        "hidden": label == "hidden" or "_holdout" in (tc.get("classname") or ""),
                         "passed": bad is None,
                         "message": (bad.get("message") or "")[:300] if bad is not None else "",
                     }
                 )
-        return {"passed": r.returncode == 0, "tests": results, "log": r.stdout[-2000:]}
+        return {"exit_code": code, "tests": results, "log": out, "duration_ms": ms}
+
+    def run_tests(self):
+        """Locked tests, then hidden tests: separate runs so each has its own exit code."""
+        locked = self.run_suite("locked", ["protected/tests"])
+        runs = [locked]
+        if (self.path / "_holdout").exists():
+            runs.append(self.run_suite("hidden", ["_holdout"]))
+        return {
+            "passed": all(r["exit_code"] == 0 for r in runs),
+            "tests": [t for r in runs for t in r["tests"]],
+            "log": locked["log"][-2000:],
+            "isolation": self.isolation,
+            # exit codes and durations per suite; the hidden suite's raw output is never kept
+            "suites": {
+                label: {"exit_code": r["exit_code"], "duration_ms": r["duration_ms"]}
+                for label, r in zip(("locked", "hidden"), runs, strict=False)
+            },
+        }
 
     def start(self):
         self.port = int(os.environ.get("MIRROR_PORT") or free_port())
-        self.proc = subprocess.Popen(
-            [
-                sys.executable,
+        if self.isolation == "docker":
+            self.container = f"forgeit-mirror-{uuid.uuid4().hex[:10]}"
+            argv = [
+                "python",
                 "-m",
                 "uvicorn",
                 "app.main:app",
                 "--host",
-                "127.0.0.1",
+                "0.0.0.0",
                 "--port",
-                str(self.port),
+                str(CONTAINER_PORT),
                 "--log-level",
                 "warning",
-            ],
-            cwd=self.path,
-            env=self.env(),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        for _ in range(60):
+            ]
+            subprocess.run(
+                self.docker_args(
+                    argv,
+                    network="bridge",
+                    detach=True,
+                    publish=f"127.0.0.1:{self.port}:{CONTAINER_PORT}",
+                    name=self.container,
+                ),
+                capture_output=True,
+                check=True,
+                timeout=60,
+            )
+        else:
+            self.proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "uvicorn",
+                    "app.main:app",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(self.port),
+                    "--log-level",
+                    "warning",
+                ],
+                cwd=self.path,
+                env=self.env(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        for _ in range(120):
             try:
                 if (
                     httpx.get(f"http://127.0.0.1:{self.port}/api/health", timeout=1).status_code
@@ -194,6 +331,8 @@ class Mirror:
         return rows
 
     def destroy(self):
+        if self.container:
+            subprocess.run(["docker", "rm", "-f", self.container], capture_output=True, timeout=60)
         if self.proc:
             self.proc.terminate()
             try:

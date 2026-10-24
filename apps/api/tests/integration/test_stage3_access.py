@@ -120,14 +120,18 @@ def test_catalog_is_editable_by_the_owner_only(api, team):
     )
 
 
-def test_hidden_tests_and_journey_are_owner_only(api, team):
+def test_hidden_tests_need_a_second_person_and_journey_is_owner_only(api, team):
     rid, t = team
     hid = {"filename": "test_x.py", "content": "def test_x(): pass\n"}
     assert (
-        api.post(f"/api/rooms/{rid}/holdout", json=hid, headers=t["aman"]["H"]).status_code == 403
+        api.post(f"/api/rooms/{rid}/holdout", json=hid, headers=t["aman"]["H"]).status_code == 200
     )
+    own = api.post(f"/api/rooms/{rid}/holdout/test_x.py/approve", headers=t["aman"]["H"])
+    assert own.status_code == 400  # the author cannot approve their own hidden test
+    ok = api.post(f"/api/rooms/{rid}/holdout/test_x.py/approve", headers=t["riya"]["H"])
+    assert ok.status_code == 200 and ok.json()["tests"] == ["test_x"]
     assert (
-        api.post(f"/api/rooms/{rid}/holdout", json=hid, headers=t["riya"]["H"]).status_code == 200
+        "def test_x" not in api.get(f"/api/rooms/{rid}/holdout/drafts", headers=t["aman"]["H"]).text
     )
     assert (
         api.put(f"/api/rooms/{rid}/journey", json={"goal": "x"}, headers=t["aman"]["H"]).status_code

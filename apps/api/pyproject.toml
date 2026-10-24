@@ -47,7 +47,7 @@ known-third-party = ["alembic"]
 "tests/**" = ["S101"]
 # TODO(stage-12..18): modules ported as-is from the Referee codebase. They shell out to git/docker
 # on purpose (S603/S607) and carry long prompt strings. Harden and drop these ignores stage by stage.
-"app/services/**" = ["E501", "E741", "S603", "S607", "B904", "S110", "S112", "N806", "SIM105", "E731", "RUF005", "RUF059", "F841", "S107", "N817"]
+"app/services/**" = ["E501", "E741", "S603", "S607", "B904", "S110", "S112", "N806", "SIM105", "E731", "RUF005", "RUF059", "F841", "S107", "N817", "S104"]
 "app/routers/rooms.py" = ["E501", "E741", "B904", "RUF005"]
 "app/llm/providers.py" = ["E501", "B904"]
 "app/core/auth.py" = ["E501"]

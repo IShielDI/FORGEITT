@@ -224,6 +224,11 @@ def test_human_hidden_test_runs_in_the_mirror_and_is_not_served(api, blank):
         ).status_code
         == 200
     )
+    assert (
+        api.get(f"/api/rooms/{blank}/holdout").json() == []
+    )  # a draft does not run until approved
+    approve = api.post(f"/api/rooms/{blank}/holdout/test_hidden_unicode.py/approve")
+    assert approve.status_code == 200 and "Zo" not in approve.text  # names only, never the source
     assert api.get(f"/api/rooms/{blank}/holdout").json() == ["test_hidden_unicode.py"]
     # a change that hard-codes the visible answers is caught by the hidden test (borrowing the project's locked fixtures)
     cheat = ScriptedProvider(

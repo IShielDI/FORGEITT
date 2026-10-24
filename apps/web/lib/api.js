@@ -15,4 +15,4 @@ export async function api(path, { rid, method, body } = {}) {
 }
 // <video> and EventSource cannot send headers, so they carry the token in the address.
 export const withToken = (rid, url) => `${API}${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(getToken(rid))}`;
-export const money = (x) => "$" + Number(x || 0).toFixed(2);
+export { money } from "./util.mjs";
