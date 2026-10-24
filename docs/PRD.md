@@ -81,10 +81,10 @@ A shared engineering workspace where a team discusses a product, an observing ag
 | Wrong failure attribution | Report confidence and alternates, not certainty |
 | Free-tier rate limits | Provider abstraction, caching, recorded demo |
 | Agent escapes or leaks | Container isolation, no secrets, network limits |
-| Scope creep | Stage-gated roadmap in BUILD_PROMPTS.md |
+| Scope creep | Stage-gated roadmap in BUILD_PROMPTS.md (repo root) |
 
 ## 11. Release Plan
-- **MVP (stages 0 to 17):** chat, spec, plan, agents, mirror, checks, routing, human merge.
+- **MVP (stages 0 to 18):** chat, spec, plan, agents, mirror, checks, routing, human merge.
 - **v1:** adaptive profiles, browser testing agent, hidden tests, graph retrieval.
 
 ## 12. Open Questions
