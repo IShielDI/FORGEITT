@@ -15,8 +15,25 @@ jobs:
     defaults:
       run:
         working-directory: apps/api
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: collab
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d collab"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       LLM_PROVIDER: mock
+      DATABASE_URL: postgresql+psycopg://app:app@localhost:5432/collab
+      TEST_DATABASE_URL: postgresql+psycopg://app:app@localhost:5432/collab_test
+      REQUIRE_DB: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +51,9 @@ jobs:
 
       - name: Mypy
         run: mypy app
+
+      - name: Migrations (upgrade, downgrade, upgrade)
+        run: alembic upgrade head && alembic downgrade base && alembic upgrade head
 
       - name: Pytest
         run: pytest -q
