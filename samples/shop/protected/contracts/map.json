@@ -1,0 +1,11 @@
+{
+  "parts": {
+    "frontend": {"paths": ["app/main.py#pages"], "owner": "riya", "depends_on": ["backend"]},
+    "backend":  {"paths": ["app/main.py"], "owner": "aman", "depends_on": ["database"]},
+    "database": {"paths": ["app/db.py"], "owner": "kriti", "depends_on": []},
+    "qa":       {"paths": ["protected/"], "owner": "kriti", "depends_on": []}
+  },
+  "handler_to_part": {"checkout": "backend", "cart_add": "backend", "signup": "backend", "cart": "backend", "products": "backend"},
+  "test_to_part": {"test_shop.py": "backend", "test_hidden_checkout.py": "backend"},
+  "journeys": {"checkout_journey": ["frontend", "backend", "database"]}
+}

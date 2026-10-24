@@ -38,7 +38,7 @@ Companion to PRD.md and ARCHITECTURE.md. Status: v2 (fixes applied).
       tests/
     web/            Next.js app (JavaScript)
   sandbox/          Dockerfiles for agent and mirror images, proxy config
-  samples/          demo target app
+  samples/          demo target app (shop/) and its hidden tests (shop-holdout/)
   docs/             PRD, TRD, ARCHITECTURE, adr/, source/
   scripts/
   .github/workflows/
@@ -69,15 +69,29 @@ Companion to PRD.md and ARCHITECTURE.md. Status: v2 (fixes applied).
 
 Rules: confirmed spec items and contracts are append-only; edits create a new version. A confirmed suggestion becomes a `decision` item.
 
-Conventions (implemented in `apps/api/app/models`, Alembic migration `0001`, batch mode for SQLite):
-- Every table has a string UUID `id` (`VARCHAR(36)`) plus `created_at` and `updated_at`.
-- Every workspace-scoped table indexes `workspace_id`, with `ON DELETE CASCADE`.
-- Enums are stored as lowercase values with named `CHECK` constraints, so the database rejects unknown values even outside the ORM.
-- List fields (`source_message_ids`, `depends_on`, `contract_ids`, `allowed_providers`) and `*_json`/`payload` are JSON. `amount_usd` is `NUMERIC(12,6)`.
-- Every connection sets `foreign_keys=ON`, `journal_mode=WAL` and a busy timeout. Relative SQLite paths resolve from the repo root.
-- Check constraints: versions >= 1; failure `confidence` in [0, 1]; `merged_sha` only on an approved decision; invite `used_at` and `used_by` set together.
-- `referee_runs.verdict` defaults to `not_run`, never `pass`. `hidden_tests` stores only the location, never test source. `check_results.command` and `duration_ms` record stage 16 evidence.
-- Apply the schema with `cd apps/api && alembic upgrade head`.
+### 3.1 Implemented schema (current)
+The list above is the target model. The running code reuses the existing Referee platform (AGENTS rule 8). Its schema lives in `apps/api/app/models/tables.py`, is applied by Alembic migration `0001`, and the services query it with plain SQL through `app.core.db`. A "room" is a workspace. IDs are integers, and timestamps are Unix epoch seconds.
+
+| TRD entity | Implemented as | Notes |
+|---|---|---|
+| workspaces | `rooms(id, name, created, mode[sample\|blank], bootstrapped)` | No `slug`, `allowed_providers` or `verification_profile` yet |
+| users + members | `members(id, room_id, name, email, token_hash, is_owner)` | One login token per member, issued at room creation; roles are owner or member (no `viewer` yet) |
+| invites | none yet | Stage 3 |
+| messages | none yet (agent activity is in `events`) | Stage 4 |
+| spec_items, spec_versions | none yet | Stages 7 and 8 |
+| contracts | `memory` rows with kind `contract`/`contract-change`, plus `protected/contracts/*.json` in the repo | Stage 9 |
+| tasks | `agents`, `agent_catalog`, `parts` (part ownership and dependencies) | Stage 9 |
+| knowledge_links | `memory` (kinds: decision, contract, handoff, failure, ...) | Stage 10 |
+| submissions + integration_runs + check_results | `changes(..., status, evidence JSON, verdict, kind[normal\|bootstrap])` | Test results live in `changes.evidence` |
+| hidden_tests | files in `<GIT_STORAGE_PATH>/rooms/<id>/holdout/` | Outside every agent workspace; only file names are served |
+| referee_runs | `referee_runs(id, room_id, ts, runner, steps)` for the hourly cap; verdicts in `changes.evidence.referee` | |
+| failures | `memory` kind `failure`; routing in `changes.evidence.routed` | |
+| approvals | `merges(id, room_id, change_ids, snapshot, approver, ts, undone)` | Not yet bound to a candidate SHA (R4) |
+| credit_ledger | `ledger`, `contributions`, `requests`, `loans`, `checkpoints`, `keys`, `prices` | Each member brings their own encrypted Claude key |
+| jobs | none: in-process threads plus `app/workers/background.py` | |
+| (audit) | `attempts` (blocked firewall actions), `events` (live activity) | |
+
+Conventions: every room-scoped table indexes `room_id`. Every connection sets `foreign_keys=ON`, `journal_mode=WAL` and a busy timeout. The database lives in `PLATFORM_STATE` (default `data/state/forgeit.db`), a sibling of the workspace data in `GIT_STORAGE_PATH`, never inside or above it. Model prices are seeded by the migration. Apply the schema with `cd apps/api && alembic upgrade head`; the API also runs the migrations at startup.
 
 ## 4. API Surface (REST + WS)
 

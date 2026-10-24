@@ -64,16 +64,53 @@ The project is built one stage at a time. See [BUILD_PROMPTS.md](BUILD_PROMPTS.m
 ## Getting Started
 **Prerequisites:** Git 2.40+, Python 3.11, Node.js 20+, and Docker (Docker Desktop with at least 8 GB RAM; on Windows, use the WSL2 backend). For real runs you also need a Claude API key, a TinyFish API key, a tunnel tool, and a Gmail app password. None of these are needed for development: `LLM_PROVIDER=mock` works without keys.
 
-Copy `.env.example` to `.env` (never commit `.env`). Keys live only in the backend environment and never enter a sandbox. Then:
+Copy `.env.example` to `.env` (never commit `.env`). Then:
 ```
+docker build -t forgeit-agent:latest sandbox/agent      # the agents' sandbox (see Isolation)
+
 cd apps/api && python -m venv .venv && .venv/Scripts/activate   # macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev]"
-alembic upgrade head                     # creates data/forgeit.db (SQLite)
+alembic upgrade head                     # creates data/state/forgeit.db (SQLite); the API also runs this at startup
 uvicorn app.main:app --reload            # http://localhost:8000/docs
+pytest -q                                # offline tests, no keys needed
 
-cd apps/web && npm install && npm run dev   # http://localhost:3000
+cd apps/web && npm install && npm run build && npm start   # http://localhost:3000; passes /api/* on to the backend (BACKEND_URL)
 ```
-The SQLite database lives at `data/forgeit.db` in the repo root, whichever folder you run from. These commands become available as their stages land (backend from stage 1, web from stage 5). Contributors and AI agents should read [AGENTS.md](AGENTS.md) first.
+Open http://localhost:3000 and start a workspace. Each person gets one login token, shown once. Enter the workspace, paste your Claude key and a budget, pick an agent and give it a task. The demo shop (`samples/shop`) comes with locked tests and hidden tests (`samples/shop-holdout`). A blank project begins with a **bootstrap**: the agent writes a short spec, the tests and the first app, and a human approves it to make it the locked original.
+
+To run real agents from a script with capped spend: `ANTHROPIC_API_KEY=... python scripts/live_demo.py "<task>" "<task>"`.
+
+Contributors and AI agents should read [AGENTS.md](AGENTS.md) first.
+
+### Sharing with teammates
+The machine that runs the backend and Docker is the host; everyone else only needs a browser. On the host, `cloudflared tunnel --url http://localhost:3000` prints an https address to send to the team, and each person signs in with their own token. Only share the link with teammates and stop the tunnel when you are done. The host stores everyone's keys, so only give a host you trust a key with a small budget.
+
+### Isolation (read before running real agents)
+- Agent commands run in **Docker** with no network, no keys, all capabilities dropped, memory/CPU/PID limits, only their own clone mounted, and `protected/` (locked tests and contracts) mounted read-only. If Docker or the `forgeit-agent` image is missing, the platform **refuses** to run a real model's commands. `ALLOW_UNSAFE_SANDBOX=true` overrides that on a throwaway machine only; it is not a security boundary.
+- Model calls are made by the backend, never from inside the sandbox: keys stay on the host, encrypted at rest (Fernet).
+- The database and encryption key live in `PLATFORM_STATE`, a sibling of the workspace data, never inside or above it.
+- The mirror, where agent-written code and the hidden tests run, gets a minimal environment (no keys), **but it runs on the host**. Code running there could read the hidden tests beside it. Containerising the mirror is open work.
+- The bash firewall (blocks `..`, platform paths, edits of protected files) is a speed bump. The real wall is the commit-time check that rejects any change to `protected/`.
+- Without a TinyFish key and a public address, the referee reports **not run**; it never pretends. `REFEREE_STANDIN=true` enables an offline stand-in for rehearsals, and its verdicts are labelled as not TinyFish's.
+
+### Verified vs not
+Verified by the offline test suite (scripted stand-in agents, a fake TinyFish server):
+- logins scoped per workspace; keys encrypted and never echoed
+- the agent catalog, and the live activity stream with stop
+- bootstrap → review → approval → locked original
+- firewall blocks, and hidden tests catching a hard-coded answer
+- the referee's "not run" honesty
+- the TinyFish client protocol: `error.category`, 402, `max_steps`, `capture_config`
+- ledger, loans and checkpoints; merge and undo (owner only)
+
+**Not yet verified** (needs your keys, network or a real run on the host):
+- real Claude calls
+- the real TinyFish API, its screenshots and recording
+- a tunnel reaching TinyFish's cloud browser
+- a full agent run inside the Docker sandbox
+- Anthropic's terms for lending a key
+
+Per AGENTS.md, nothing in that second list should be described as working until it passes the real-run test.
 
 ## Documentation
 - [Product Requirements (PRD)](docs/PRD.md)

@@ -26,6 +26,7 @@ Follow the layout in `docs/TRD.md` section 2. Put new files where they belong fr
 cd apps/api && pip install -e ".[dev]"
 cd apps/api && alembic upgrade head      # create/upgrade the SQLite schema
 cd apps/api && uvicorn app.main:app --reload
+docker build -t forgeit-agent:latest sandbox/agent   # agent sandbox image
 cd apps/api && pytest -q
 cd apps/api && ruff check . && mypy app
 cd apps/web && npm install && npm run dev

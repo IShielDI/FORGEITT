@@ -1,0 +1,6 @@
+{
+  "signup":   "POST /signup {email,password} -> 303 to /products, sets uid cookie",
+  "cart_add": "POST /cart/add {product_id,qty} -> 303 to /cart",
+  "checkout": "POST /checkout -> page with 'Order placed', 'Confirmation number: ORD-<id>', and 'Order total' equal to sum(price*qty); persists one order row with that total",
+  "orders_api": "GET /api/orders?email= -> [{id,email,total_cents}]"
+}
