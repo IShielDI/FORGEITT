@@ -13,7 +13,17 @@ from pydantic import BaseModel
 
 from app.core import auth, config
 from app.core.db import ex, now, q, q1
-from app.services import agent_runner, events, gitops, graph, ledger, memory, orchestrator, referee
+from app.services import (
+    agent_runner,
+    events,
+    gitops,
+    graph,
+    invites,
+    ledger,
+    memory,
+    orchestrator,
+    referee,
+)
 
 router = APIRouter()
 
@@ -104,6 +114,16 @@ class HoldoutIn(BaseModel):
     content: str
 
 
+class InviteIn(BaseModel):
+    role: str = "member"
+    email: str = ""
+
+
+class AcceptIn(BaseModel):
+    name: str
+    email: str = ""
+
+
 def _room(rid):
     r = q1("SELECT * FROM rooms WHERE id=?", (rid,))
     if not r:
@@ -115,6 +135,16 @@ def _who(request, rid, claimed=None):
     """The acting member (or None when logins are off and nobody was named). Also checks the room exists."""
     _room(rid)
     return auth.actor(request, rid, claimed)
+
+
+def _writer(request, rid, claimed=None):
+    """The acting member for a change; viewers are refused (read-only)."""
+    _room(rid)
+    return auth.writer(request, rid, claimed)
+
+
+def _slug(name):
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:60] or "workspace"
 
 
 def _name(m, fallback=""):
@@ -167,8 +197,8 @@ def create_room(body: RoomIn):
         raise HTTPException(400, "a room needs at least one member")
     blank = body.template == "blank"
     rid = ex(
-        "INSERT INTO rooms(name,created,mode,bootstrapped) VALUES(?,?,?,?)",
-        (body.name, now(), body.template, 0 if blank else 1),
+        "INSERT INTO rooms(name,slug,created,mode,bootstrapped) VALUES(?,?,?,?,?)",
+        (body.name, _slug(body.name), now(), body.template, 0 if blank else 1),
     )
     h = gitops.room_dir(rid) / "holdout"
     if blank:
@@ -182,8 +212,15 @@ def create_room(body: RoomIn):
         tok = auth.new_token()
         tokens[m.name] = tok
         mid = ex(
-            "INSERT INTO members(room_id,name,email,token_hash,is_owner) VALUES(?,?,?,?,?)",
-            (rid, m.name, m.email, auth.hash_token(tok), 1 if i == 0 else 0),
+            "INSERT INTO members(room_id,name,email,token_hash,is_owner,role) VALUES(?,?,?,?,?,?)",
+            (
+                rid,
+                m.name,
+                m.email,
+                auth.hash_token(tok),
+                1 if i == 0 else 0,
+                "owner" if i == 0 else "member",
+            ),
         )
         mids[m.name] = mid
         if m.anthropic_key:
@@ -261,7 +298,7 @@ def rooms():
 def room(rid: int, request: Request, member: int | None = None):
     r = _room(rid)
     me = _who(request, rid, member) or {}
-    members = q("SELECT id,name,email,is_owner FROM members WHERE room_id=?", (rid,))
+    members = q("SELECT id,name,email,is_owner,role FROM members WHERE room_id=?", (rid,))
     view_member = me.get("id") or member or members[0]["id"]
     return {
         "room": r,
@@ -301,6 +338,7 @@ def me(rid: int, request: Request, member: int | None = None):
         "id": m["id"],
         "name": m["name"],
         "is_owner": bool(m["is_owner"]),
+        "role": auth.role_of(m),
         "has_key": bool(k),
         "key_last4": k["last4"] if k else None,
         "key_type": k["key_type"] if k else None,
@@ -310,7 +348,7 @@ def me(rid: int, request: Request, member: int | None = None):
 @router.post("/api/rooms/{rid}/me/key")
 def connect_key(rid: int, body: KeyIn, request: Request, member: int | None = None):
     """Connect your own Anthropic API key. It is encrypted at rest and never sent back to any screen."""
-    m = _who(request, rid, member)
+    m = _writer(request, rid, member)
     if not m:
         raise HTTPException(400, "say who you are (member id)")
     if not body.anthropic_key.startswith("sk-ant-"):
@@ -327,7 +365,7 @@ def connect_key(rid: int, body: KeyIn, request: Request, member: int | None = No
 # ---------- discussion / split ----------
 @router.post("/api/rooms/{rid}/memory")
 def add_decision(rid: int, body: DecisionIn, request: Request):
-    m = _who(request, rid)
+    m = _writer(request, rid)
     return {
         "id": memory.add(
             rid, "decision", _name(m, body.author or "member"), body.content, part=body.part
@@ -355,7 +393,7 @@ def split(rid: int, request: Request):
 
 @router.post("/api/rooms/{rid}/contract-changes/{mid}/approve")
 def approve_cc(rid: int, mid: int, request: Request, approver: str = ""):
-    m = _who(request, rid)
+    m = _writer(request, rid)
     req = q1("SELECT * FROM memory WHERE id=? AND room_id=? AND kind='contract-change'", (mid, rid))
     if not req:
         raise HTTPException(404, "no such request")
@@ -481,7 +519,7 @@ def _safe_exec(*a):
 def run_picked(rid: int, body: RunAsIn, request: Request, wait: bool = False):
     """Pick an agent from the workspace catalog and give it a task. It runs as YOU: your workspace, your key, your portion.
     In a blank project the first task is automatically the bootstrap."""
-    m = _who(request, rid, body.member_id)
+    m = _writer(request, rid, body.member_id)
     if not m:
         raise HTTPException(400, "say who you are (member_id)")
     e = q1("SELECT * FROM agent_catalog WHERE room_id=? AND key=?", (rid, body.agent))
@@ -505,7 +543,7 @@ def run_agent(rid: int, name: str, body: RunIn, request: Request, wait: bool = T
     ag = q1("SELECT * FROM agents WHERE room_id=? AND name=?", (rid, name))
     if not ag:
         raise HTTPException(404, "no such agent")
-    _who(request, rid, ag["member_id"])
+    _writer(request, rid, ag["member_id"])
     _guard_blank(rid)
     _known_model(body.model)
     if body.model:
@@ -528,7 +566,7 @@ def bootstrap(rid: int, body: BootstrapIn, request: Request, wait: bool = True):
     ag = q1("SELECT * FROM agents WHERE room_id=? AND name=?", (rid, name)) if name else None
     if not ag:
         raise HTTPException(404, "no such agent")
-    _who(request, rid, ag["member_id"])
+    _writer(request, rid, ag["member_id"])
     return _start(rid, name, body.task, None, True, wait)
 
 
@@ -537,7 +575,7 @@ def stop_agent(rid: int, name: str, request: Request):
     ag = q1("SELECT * FROM agents WHERE room_id=? AND name=?", (rid, name))
     if not ag:
         raise HTTPException(404, "no such agent")
-    m = _who(request, rid)
+    m = _writer(request, rid)
     if config.REQUIRE_AUTH and ag["member_id"] != m["id"] and not m["is_owner"]:
         raise HTTPException(403, "only the agent's member or the workspace owner can stop it")
     ex("UPDATE agents SET stop_requested=1 WHERE id=?", (ag["id"],))
@@ -550,7 +588,7 @@ def budget_choice(rid: int, name: str, body: ChoiceIn, request: Request):
     ag = q1("SELECT * FROM agents WHERE room_id=? AND name=?", (rid, name))
     if not ag:
         raise HTTPException(404, "no such agent")
-    _who(request, rid, ag["member_id"])
+    _writer(request, rid, ag["member_id"])
     _known_model(body.backup_model)
     if body.choice == "backup":
         ex(
@@ -668,7 +706,7 @@ def change(cid: int, request: Request):
 
 @router.post("/api/rooms/{rid}/referee/run")
 def referee_run(rid: int, request: Request, force: bool = True):
-    _who(request, rid)
+    _writer(request, rid)
     return orchestrator.run_referee(rid, force=force) or {
         "skipped": "nothing ready or pile not due"
     }
@@ -743,7 +781,7 @@ def budget(rid: int, request: Request, member: int | None = None):
 
 @router.post("/api/rooms/{rid}/contribute")
 def contribute(rid: int, body: AmountIn, request: Request):
-    m = _who(request, rid, body.member_id)
+    m = _writer(request, rid, body.member_id)
     if not m or body.amount <= 0:
         raise HTTPException(400, "say who you are and a positive amount")
     return {"id": ledger.contribute(rid, m["id"], body.amount)}
@@ -751,7 +789,7 @@ def contribute(rid: int, body: AmountIn, request: Request):
 
 @router.post("/api/rooms/{rid}/requests")
 def make_request(rid: int, body: AmountIn, request: Request):
-    m = _who(request, rid, body.member_id)
+    m = _writer(request, rid, body.member_id)
     if not m:
         raise HTTPException(400, "say who you are (member_id)")
     try:
@@ -773,7 +811,7 @@ def _req_room(req):
 
 @router.post("/api/requests/{req}/fund")
 def fund(req: int, body: FundIn, request: Request):
-    m = _who(request, _req_room(req), body.lender)
+    m = _writer(request, _req_room(req), body.lender)
     if not m:
         raise HTTPException(400, "say who you are (lender)")
     try:
@@ -787,7 +825,7 @@ def fund(req: int, body: FundIn, request: Request):
 
 @router.post("/api/requests/{req}/reject")
 def reject(req: int, request: Request, lender: int | None = None):
-    m = _who(request, _req_room(req), lender)
+    m = _writer(request, _req_room(req), lender)
     if not m:
         raise HTTPException(400, "say who you are (lender)")
     ledger.reject_request(req, m["id"])
@@ -799,10 +837,58 @@ def close_loan(lid: int, request: Request, member: int | None = None):
     l = q1("SELECT room_id FROM loans WHERE id=?", (lid,))
     if not l:
         raise HTTPException(404, "no such loan")
-    m = _who(request, l["room_id"], member)
+    m = _writer(request, l["room_id"], member)
     if not m:
         raise HTTPException(400, "say who you are (member)")
     try:
         return {"returned": ledger.close_loan(lid, m["id"])}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# ---------- members and invites (stage 3) ----------
+@router.get("/api/rooms/{rid}/members")
+def members(rid: int, request: Request):
+    _who(request, rid)
+    return q("SELECT id,name,email,is_owner,role FROM members WHERE room_id=? ORDER BY id", (rid,))
+
+
+@router.post("/api/rooms/{rid}/invites")
+def create_invite(rid: int, body: InviteIn, request: Request):
+    """Owner only. The link is returned once (also mailed when Gmail SMTP is configured)."""
+    _room(rid)
+    m = auth.owner(request, rid) if config.REQUIRE_AUTH else None
+    try:
+        return invites.create(rid, m["id"] if m else None, body.role, body.email)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/api/rooms/{rid}/invites")
+def list_invites(rid: int, request: Request):
+    _room(rid)
+    if config.REQUIRE_AUTH:
+        auth.owner(request, rid)
+    return invites.listing(rid)
+
+
+_INVITE_STATUS = {"unknown": 404, "used": 410, "expired": 410}
+
+
+@router.get("/api/invites/{token}")
+def peek_invite(token: str):
+    try:
+        return invites.peek(token)
+    except invites.InviteError as e:
+        raise HTTPException(_INVITE_STATUS[e.code], str(e))
+
+
+@router.post("/api/invites/{token}/accept")
+def accept_invite(token: str, body: AcceptIn):
+    """Join a workspace with a single-use invite. Returns your own login token once."""
+    try:
+        return invites.accept(token, body.name, body.email)
+    except invites.InviteError as e:
+        raise HTTPException(_INVITE_STATUS[e.code], str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))

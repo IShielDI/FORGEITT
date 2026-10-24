@@ -23,6 +23,7 @@ EXPECTED_TABLES = {
     "agent_catalog",
     "events",
     "referee_runs",
+    "invites",
 }
 
 
@@ -39,7 +40,7 @@ def test_metadata_covers_exactly_the_tables() -> None:
 def test_every_room_scoped_table_indexes_room_id(db_engine: Engine) -> None:
     inspector = inspect(db_engine)
 
-    assert len(ROOM_SCOPED) == 15
+    assert len(ROOM_SCOPED) == 16
     for table in ROOM_SCOPED:
         leading = [ix["column_names"][0] for ix in inspector.get_indexes(table)]
         assert "room_id" in leading, f"{table}.room_id has no index"

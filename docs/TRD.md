@@ -74,9 +74,9 @@ The list above is the target model. The running code reuses the existing Referee
 
 | TRD entity | Implemented as | Notes |
 |---|---|---|
-| workspaces | `rooms(id, name, created, mode[sample\|blank], bootstrapped)` | No `slug`, `allowed_providers` or `verification_profile` yet |
-| users + members | `members(id, room_id, name, email, token_hash, is_owner)` | One login token per member, issued at room creation; roles are owner or member (no `viewer` yet) |
-| invites | none yet | Stage 3 |
+| workspaces | `rooms(id, name, slug, created, mode[sample\|blank], bootstrapped)` | `slug` is a display label only; no `allowed_providers` or `verification_profile` yet |
+| users + members | `members(id, room_id, name, email, token_hash, is_owner, role[owner\|member\|viewer])` | One hashed login token per member, issued at room creation or when an invite is accepted; viewers are read-only |
+| invites | `invites(id, room_id, token_hash, role, email, created_by, created, expires, used_at, used_by)` | Single-use, 7-day expiry, hash only; `POST /api/rooms/{id}/invites` (owner), `POST /api/invites/{token}/accept` |
 | messages | none yet (agent activity is in `events`) | Stage 4 |
 | spec_items, spec_versions | none yet | Stages 7 and 8 |
 | contracts | `memory` rows with kind `contract`/`contract-change`, plus `protected/contracts/*.json` in the repo | Stage 9 |

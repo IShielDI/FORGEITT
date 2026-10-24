@@ -48,6 +48,7 @@ rooms = _table(
     Column("name", Text),
     Column("created", Float),
     Column("mode", Text, server_default=text("'sample'")),  # "sample" (demo shop) or "blank"
+    Column("slug", Text),  # display label only; never a credential and never used to join
     Column("bootstrapped", Integer, server_default=text("1")),
 )
 
@@ -59,6 +60,21 @@ members = _table(
     Column("email", Text),
     Column("token_hash", Text),  # SHA-256 of the login token; the raw token is shown once
     Column("is_owner", Integer, server_default=text("0")),
+    Column("role", Text, server_default=text("'member'")),  # owner | member | viewer (read-only)
+)
+
+invites = _table(
+    "invites",
+    _id(),
+    _room(),
+    Column("token_hash", Text, unique=True),  # only the hash is stored; the link is shown once
+    Column("role", Text, server_default=text("'member'")),
+    Column("email", Text),
+    Column("created_by", Integer),
+    Column("created", Float),
+    Column("expires", Float),
+    Column("used_at", Float),
+    Column("used_by", Integer),
 )
 
 keys = Table(
