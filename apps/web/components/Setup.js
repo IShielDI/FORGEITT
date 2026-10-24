@@ -6,6 +6,7 @@ import { api } from "../lib/api";
 export default function Setup({ rid, me, room, catalog, models, reload }) {
   const [j, setJ] = useState({ goal: "", success_text: "", db_check: "" }); const [hid, setHid] = useState([]); const [msg, setMsg] = useState("");
   const [h, setH] = useState({ filename: "", content: "" });
+  const [inv, setInv] = useState({ role: "member", email: "" }); const [link, setLink] = useState(null);
   const [c, setC] = useState({ key: "", label: "", description: "", role_prompt: "", model: models[0] || "", part: "" });
   const owner = me?.is_owner;
   const load = async () => { setJ({ goal: "", success_text: "", db_check: "", ...(await api(`/api/rooms/${rid}/journey`, { rid })) }); setHid(await api(`/api/rooms/${rid}/holdout`, { rid })); };
@@ -15,6 +16,15 @@ export default function Setup({ rid, me, room, catalog, models, reload }) {
   return (
     <div>
       <p role="status" className={msg.includes("saved") || msg.includes("Saved") ? "ok" : "err"}>{msg}</p>
+      <section className="panel">
+        <h2>Invite a teammate</h2>
+        <p className="muted">Each invite link works once and expires in 7 days. The workspace name is not a password: nobody can join without a link.</p>
+        <div className="row"><select style={{ width: "auto" }} value={inv.role} onChange={(e) => setInv({ ...inv, role: e.target.value })} aria-label="Role">
+          <option value="member">Member: can run agents</option><option value="viewer">Viewer: read-only</option></select>
+          <input className="grow" type="email" placeholder="Email (optional, the link is mailed if mail is set up)" value={inv.email} onChange={(e) => setInv({ ...inv, email: e.target.value })} aria-label="Email" />
+          <button onClick={() => run(async () => { setLink(await api(`/api/rooms/${rid}/invites`, { rid, body: inv })); setInv({ ...inv, email: "" }); }, "Invite created. Saved.")}>Create invite</button></div>
+        {link && <p className="small">{link.mailed ? "Mailed. " : "Not mailed: send this link yourself. "}It is shown once: <code>{link.link}</code> <button className="quiet" onClick={() => navigator.clipboard?.writeText(link.link)}>Copy</button></p>}
+      </section>
       <section className="panel">
         <h2>Customer journey</h2>
         <p className="muted">What a new customer does, in plain words. The referee replays it in a real browser after each change. Use {"{email}"} where a fresh email address is needed.</p>

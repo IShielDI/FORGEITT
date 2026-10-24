@@ -1,4 +1,5 @@
-"""Member logins. A member's token is shown once, when the room is created, and only its hash is stored."""
+"""Member logins and roles. A token is shown once (at room creation or when an invite is accepted);
+only its hash is stored. Roles: owner, member, viewer (read-only)."""
 
 import hashlib
 import secrets
@@ -45,4 +46,19 @@ def owner(request: Request, rid: int):
     m = actor(request, rid)
     if config.REQUIRE_AUTH and not m["is_owner"]:
         raise HTTPException(403, "only the workspace owner can do this")
+    return m
+
+
+def role_of(m) -> str:
+    """owner | member | viewer. Older rows without a role fall back to the owner flag."""
+    if not m:
+        return ""
+    return m.get("role") or ("owner" if m.get("is_owner") else "member")
+
+
+def writer(request: Request, rid: int, claimed: int | None = None):
+    """Like actor(), but viewers are read-only: they may look, never change anything."""
+    m = actor(request, rid, claimed)
+    if m and role_of(m) == "viewer":
+        raise HTTPException(403, "viewers are read-only in this workspace")
     return m

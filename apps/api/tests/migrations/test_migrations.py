@@ -6,6 +6,7 @@ from alembic import command
 from sqlalchemy import inspect
 
 from app.core.db import create_db_engine
+from app.models import metadata
 from tests.conftest import alembic_config, sqlite_url
 
 
@@ -22,13 +23,13 @@ def test_upgrade_creates_a_fresh_database(tmp_path: Path) -> None:
 
     command.upgrade(alembic_config(url), "head")
 
-    assert len(_user_tables(url)) == 18
+    assert len(_user_tables(url)) == len(metadata.tables)
 
 
 def test_upgrade_on_current_schema_is_a_no_op(db_url: str) -> None:
     command.upgrade(alembic_config(db_url), "head")
 
-    assert len(_user_tables(db_url)) == 18
+    assert len(_user_tables(db_url)) == len(metadata.tables)
 
 
 def test_downgrade_base_then_upgrade_head(db_url: str) -> None:
@@ -38,7 +39,7 @@ def test_downgrade_base_then_upgrade_head(db_url: str) -> None:
     assert _user_tables(db_url) == set()
 
     command.upgrade(cfg, "head")
-    assert len(_user_tables(db_url)) == 18
+    assert len(_user_tables(db_url)) == len(metadata.tables)
 
 
 def test_models_match_migrations(db_url: str) -> None:

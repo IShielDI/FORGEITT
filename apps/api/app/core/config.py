@@ -104,6 +104,8 @@ class Settings(BaseSettings):
     # Access
     require_auth: bool = True
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # Where people open the web app; invite links point here.
+    public_web_url: str = "http://localhost:3000"
 
     # Invites and mail (Gmail SMTP)
     smtp_host: str = "smtp.gmail.com"
@@ -173,3 +175,11 @@ ALLOW_UNSAFE_SANDBOX: bool = _settings.allow_unsafe_sandbox
 ALLOW_STANDIN: bool = _settings.referee_standin
 REQUIRE_AUTH: bool = _settings.require_auth
 CORS_ORIGINS: list[str] = [o.strip() for o in _settings.cors_origins.split(",") if o.strip()]
+PUBLIC_WEB_URL: str = _settings.public_web_url.rstrip("/")
+INVITE_TTL_DAYS: int = _settings.invite_ttl_days
+SMTP_HOST: str = _settings.smtp_host
+SMTP_PORT: int = _settings.smtp_port
+SMTP_USER: str = _settings.smtp_user or ""
+SMTP_APP_PASSWORD: str = (
+    _settings.smtp_app_password.get_secret_value() if _settings.smtp_app_password else ""
+)
