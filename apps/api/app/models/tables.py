@@ -81,6 +81,8 @@ invites = _table(
     Column("expires", Float),
     Column("used_at", Float),
     Column("used_by", Integer),
+    # set for teammates added when the workspace was created: accepting signs in as that member
+    Column("member_id", Integer),
 )
 
 keys = Table(

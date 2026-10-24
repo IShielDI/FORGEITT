@@ -77,6 +77,7 @@ def test_peek_shows_room_and_role(api, team):
         "room_name": "Invite Room",
         "role": "viewer",
         "email": "",
+        "name": "",
     }
 
 
@@ -116,9 +117,11 @@ def test_invite_listing_is_owner_only_and_hides_tokens(api, team):
     assert listing.status_code == 200 and inv["token"] not in listing.text
 
 
-def test_teammates_added_at_creation_get_their_login_by_mail(api, monkeypatch):
-    sent: list[tuple] = []
-    monkeypatch.setattr(mail, "send_credentials", lambda *a: sent.append(a) or True)
+def test_teammates_added_at_creation_get_the_invite_mail_and_join_as_themselves(api, monkeypatch):
+    invites_sent: list[tuple] = []
+    logins_sent: list[tuple] = []
+    monkeypatch.setattr(mail, "send_invite", lambda *a: invites_sent.append(a) or True)
+    monkeypatch.setattr(mail, "send_credentials", lambda *a: logins_sent.append(a) or True)
     r = api.post(
         "/api/rooms",
         json={
@@ -131,14 +134,31 @@ def test_teammates_added_at_creation_get_their_login_by_mail(api, monkeypatch):
             ],
         },
     ).json()
+    by_name = {m["name"]: m for m in r["members"]}
 
-    flags = {m["name"]: m["mailed"] for m in r["members"]}
-    assert flags == {
+    # the same invite mail as Setup invites, not a bare token; the owner never sees mate's login
+    assert {n: m["mailed"] for n, m in by_name.items()} == {
         "owner": False,
         "mate": True,
         "nomail": False,
-    }  # the owner sees theirs on screen
-    assert len(sent) == 1 and sent[0][0] == "m@example.test" and sent[0][2] == r["id"]
+    }
+    assert by_name["mate"]["token"] is None and by_name["nomail"]["token"]
+    assert len(invites_sent) == 1 and not logins_sent
+    to, room_name, rid, link, code = invites_sent[0][:5]
+    assert link.endswith("/invite/" + code)
+    assert to == "m@example.test" and room_name == "Mail Room" and rid == r["id"]
+
+    peek = api.get(f"/api/invites/{code}").json()
+    assert peek["name"] == "mate" and peek["email"] == "m@example.test"
+
+    joined = api.post(f"/api/invites/{code}/accept", json={"name": ""}).json()
+    assert joined["member_id"] == by_name["mate"]["id"] and joined["name"] == "mate"
+    assert (
+        logins_sent
+        and logins_sent[0][0] == "m@example.test"
+        and logins_sent[0][4] == joined["token"]
+    )
+    assert api.post(f"/api/invites/{code}/accept", json={"name": "x"}).status_code == 410
 
 
 def test_only_the_owner_deletes_and_must_retype_the_name(api, team):

@@ -20,8 +20,8 @@ export default function Welcome() {
       </div>
       {mates.length > 0 && <div className="card">
         <h2>Your teammates</h2>
-        <p className="muted small">Workspace number <b>{m.id}</b>. {mates.some((x) => !x.mailed) ? "Mail is not set up for some of them, so send these privately. Shown once." : "Everyone below was emailed their workspace number and token."}</p>
-        {mates.map((x) => <div className="invite-row" key={x.id}><span><b>{x.name}</b> <span className="muted small">{x.mailed ? "emailed" : "not emailed"}</span></span>
+        <p className="muted small">Workspace number <b>{m.id}</b>. {mates.some((x) => !x.mailed) ? "Some invites could not be emailed, so send those logins privately. Shown once." : "Everyone below was emailed an invite link. Opening it signs them in and gives them their own login."}</p>
+        {mates.map((x) => <div className="invite-row" key={x.id}><span><b>{x.name}</b> <span className="muted small">{x.mailed ? "invite emailed" : "not emailed"}</span></span>
           {!x.mailed && <span><code className="token">{x.token}</code> <button className="quiet" onClick={() => navigator.clipboard?.writeText(`Workspace ${m.id}, token ${x.token}`)}>Copy</button></span>}</div>)}
       </div>}
       <div className="card">

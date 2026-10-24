@@ -7,7 +7,7 @@ export default function Invite({ params }) {
   const token = params.token;
   const [info, setInfo] = useState(null); const [err, setErr] = useState("");
   const [name, setName] = useState(""); const [email, setEmail] = useState(""); const [joined, setJoined] = useState(null); const [busy, setBusy] = useState(false);
-  useEffect(() => { api(`/api/invites/${encodeURIComponent(token)}`).then((i) => { setInfo(i); setEmail((v) => v || i.email || ""); }).catch((e) => setErr(e.message)); }, [token]);
+  useEffect(() => { api(`/api/invites/${encodeURIComponent(token)}`).then((i) => { setInfo(i); setEmail((v) => v || i.email || ""); setName((v) => v || i.name || ""); }).catch((e) => setErr(e.message)); }, [token]);
 
   const accept = async (e) => {
     e.preventDefault(); setErr(""); setBusy(true);
@@ -39,7 +39,8 @@ export default function Invite({ params }) {
       {!info && !err && <p className="muted">Checking the invite…</p>}
       <p className="err" role="alert">{err}</p>
       {info && <form onSubmit={accept}>
-        <label htmlFor="n">Your name</label><input id="n" autoFocus value={name} onChange={(e) => setName(e.target.value)} />
+        {info.name ? <p>You are joining as <b>{info.name}</b>: the owner already added you, so your parts of the project are waiting.</p>
+          : <><label htmlFor="n">Your name</label><input id="n" autoFocus value={name} onChange={(e) => setName(e.target.value)} /></>}
         <label htmlFor="e">Email (optional: we send your login here for other devices)</label><input id="e" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
         <div className="actions"><button className="go" disabled={!name.trim() || busy}>{busy ? "Joining…" : "Join"}</button></div>
       </form>}

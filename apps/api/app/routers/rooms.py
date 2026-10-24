@@ -24,7 +24,6 @@ from app.services import (
     hidden_tests,
     invites,
     ledger,
-    mail,
     memory,
     model_providers,
     orchestrator,
@@ -308,10 +307,13 @@ def create_room(body: RoomIn):
         (gitops.original(rid) / "protected/contracts/contracts.json").read_text()
     ).items():
         memory.add(rid, "contract", "platform", f"{c[0]}: {c[1]}", by_platform=True)
-    mailed = {  # teammates added at creation get their workspace number and token by email (owner sees theirs on screen)
-        m.name: mail.send_credentials(
-            m.email.strip(), body.name, rid, m.name, tokens[m.name], config.PUBLIC_WEB_URL
-        )
+    # Teammates with an email get the same invite mail as Setup invites: a single-use link that
+    # signs them in as the member made here (their parts and agent are already set up). When the
+    # mail goes out, their token is not shown to the owner: only the teammate will hold that login.
+    mailed = {
+        m.name: invites.create(
+            rid, mids[names[0]], "member", m.email.strip(), member_id=mids[m.name]
+        )["mailed"]
         for i, m in enumerate(body.members)
         if i > 0 and m.email.strip()
     }
@@ -321,7 +323,7 @@ def create_room(body: RoomIn):
             {
                 "id": mids[n],
                 "name": n,
-                "token": tokens[n],
+                "token": None if mailed.get(n) else tokens[n],
                 "is_owner": n == names[0],
                 "mailed": mailed.get(n, False),
             }
