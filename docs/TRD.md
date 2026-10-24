@@ -41,7 +41,7 @@ Companion to PRD.md and ARCHITECTURE.md.
   docs/             PRD, TRD, ARCHITECTURE, ADRs
   scripts/
   .github/workflows/
-  AGENTS.md  SETUP.md  BUILD_PROMPTS.md  docker-compose.yml
+  AGENTS.md  BUILD_PROMPTS.md  README.md  docker-compose.yml
 ```
 
 ## 3. Data Model (core tables)
@@ -57,12 +57,14 @@ Companion to PRD.md and ARCHITECTURE.md.
 - `knowledge_links(id, workspace_id, src_type, src_id, dst_type, dst_id, relation, version)`
 - `submissions(id, task_id, commit_sha, handoff_summary, status, created_at)`
 - `integration_runs(id, workspace_id, candidate_branch, base_sha, status, profile, started_at, finished_at)`
-- `check_results(id, run_id, name, kind, exit_code, status, log_path, artifacts_json)`
+- `check_results(id, run_id, name, kind, command, exit_code, duration_ms, status, log_path, artifacts_json)`
 - `failures(id, run_id, check_result_id, suspected_task_id, suspected_contract_id, confidence, evidence_json, status)`
-- `approvals(id, run_id, approver_id, decision, comment, merged_sha, created_at)`
+- `approvals(id, run_id, approver_id, decision, candidate_sha, comment, merged_sha, created_at)`
 - `jobs(id, type, payload, status, attempts, created_at)`
 
 Rule: confirmed spec items and contracts are append-only. Edits create a new version.
+
+Conventions (implemented in `apps/api/app/models`, migration `0001`): every table has a UUID `id` (`gen_random_uuid()`), `created_at` and `updated_at`; every workspace-scoped table indexes `workspace_id` with `ON DELETE CASCADE`; status and kind fields are native Postgres enums; `[]` fields are `uuid[]` and `*_json`/`payload` are `jsonb`. `check_results.command`/`duration_ms` record evidence per R6, and `approvals.candidate_sha` binds an approval to the exact candidate SHA (ARCHITECTURE section 4). Check constraints: versions >= 1, failure `confidence` in [0, 1], and `merged_sha` only on an approved decision.
 
 ## 4. API Surface (REST + WS)
 

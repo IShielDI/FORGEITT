@@ -13,7 +13,7 @@ AI-Native Collaborative Coding Workspace: chat to spec to plan to parallel agent
 
 ## File Placement
 Follow the layout in `docs/TRD.md` section 2. Put new files where they belong from the start; never leave stray files in the root.
-- **Root:** only `AGENTS.md`, `SETUP.md`, `BUILD_PROMPTS.md`, `README.md`, `docker-compose.yml`, `.env.example`, `.gitignore`, and similar repo-level config.
+- **Root:** only `AGENTS.md`, `BUILD_PROMPTS.md`, `README.md`, `docker-compose.yml`, `.env.example`, `.gitignore`, and similar repo-level config.
 - **`docs/`:** `PRD.md`, `TRD.md`, `ARCHITECTURE.md`. ADRs go in `docs/adr/ADR-NNN-<slug>.md`. Original source material (e.g. the vision `.docx`) goes in `docs/source/`.
 - **Code:** API in `apps/api/` (`app/{core,models,schemas,routers,services,llm,workers}`, `tests/`, `alembic/`); web in `apps/web/`; sandbox Dockerfiles in `sandbox/{agent,mirror}/`; demo target in `samples/`; helper scripts in `scripts/`; CI in `.github/workflows/`.
 - **Tests** mirror the source tree (`apps/api/tests/services/test_chat.py` for `app/services/chat.py`).
