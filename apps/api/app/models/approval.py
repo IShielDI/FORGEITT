@@ -1,9 +1,7 @@
-import uuid
-
 from sqlalchemy import CheckConstraint, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, pg_enum
+from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum
 from app.models.columns import user_fk
 from app.models.enums import ApprovalDecision
 from app.models.integration import run_fk
@@ -19,12 +17,12 @@ class Approval(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
     )
 
-    run_id: Mapped[uuid.UUID] = run_fk()
-    approver_id: Mapped[uuid.UUID] = user_fk(nullable=False, index=True)
-    decision: Mapped[ApprovalDecision] = mapped_column(
-        pg_enum(ApprovalDecision, "approval_decision")
-    )
-    # ARCHITECTURE section 4: approval is bound to the run's exact candidate SHA.
+    run_id: Mapped[str] = run_fk()
+    approver_id: Mapped[str] = user_fk(nullable=False)
+    # TRD R4: approval is bound to the run's exact candidate SHA.
     candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision: Mapped[ApprovalDecision] = mapped_column(
+        str_enum(ApprovalDecision, "approval_decision")
+    )
     comment: Mapped[str | None] = mapped_column(Text)
     merged_sha: Mapped[str | None] = mapped_column(String(64))

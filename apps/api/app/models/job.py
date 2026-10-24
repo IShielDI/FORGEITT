@@ -3,8 +3,8 @@ from typing import Any
 from sqlalchemy import CheckConstraint, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, pg_enum
-from app.models.columns import jsonb_object
+from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, str_enum
+from app.models.columns import json_object
 from app.models.enums import JobStatus
 
 
@@ -18,9 +18,9 @@ class Job(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     type: Mapped[str] = mapped_column(String(100), nullable=False)
-    payload: Mapped[dict[str, Any]] = jsonb_object()
+    payload: Mapped[dict[str, Any]] = json_object()
     status: Mapped[JobStatus] = mapped_column(
-        pg_enum(JobStatus, "job_status"),
+        str_enum(JobStatus, "job_status"),
         nullable=False,
         default=JobStatus.QUEUED,
         server_default=JobStatus.QUEUED.value,

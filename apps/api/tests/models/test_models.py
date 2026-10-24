@@ -1,9 +1,10 @@
 """Behavioural tests for model defaults and database constraints."""
 
-import uuid
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, StatementError
 from sqlalchemy.orm import Session
 
@@ -11,17 +12,20 @@ from app.models import (
     Approval,
     CheckResult,
     Contract,
+    CreditLedger,
     Failure,
+    HiddenTest,
+    Invite,
     Job,
     KnowledgeLink,
     Member,
     Message,
+    RefereeRun,
     SpecItem,
     SpecVersion,
     Submission,
     Task,
     User,
-    Workspace,
 )
 from app.models.enums import (
     ApprovalDecision,
@@ -29,9 +33,12 @@ from app.models.enums import (
     CheckStatus,
     ContractKind,
     ContractStatus,
+    CreditKind,
     EntityType,
+    HiddenTestStatus,
     JobStatus,
     MemberRole,
+    RefereeVerdict,
     SpecItemKind,
     SpecItemStatus,
     SubmissionStatus,
@@ -45,23 +52,16 @@ def test_workspace_defaults(db_session: Session) -> None:
     workspace = make_workspace(db_session)
     db_session.refresh(workspace)
 
-    assert isinstance(workspace.id, uuid.UUID)
-    assert workspace.verification_profile is VerificationProfile.LIGHT
+    assert len(workspace.id) == 36
+    assert workspace.verification_profile is VerificationProfile.FAST
+    assert workspace.allowed_providers == []
     assert workspace.created_at is not None
 
 
-def test_room_code_is_unique(db_session: Session) -> None:
-    first = make_workspace(db_session)
-    db_session.add(Workspace(room_code=first.room_code, name="Dup", owner_id=first.owner_id))
-
-    with pytest.raises(IntegrityError):
-        db_session.flush()
-
-
-def test_member_unique_per_workspace(db_session: Session) -> None:
+def test_member_unique_per_workspace_and_viewer_role(db_session: Session) -> None:
     workspace = make_workspace(db_session)
     user = make_user(db_session, "Bo")
-    db_session.add(Member(workspace_id=workspace.id, user_id=user.id, role=MemberRole.OWNER))
+    db_session.add(Member(workspace_id=workspace.id, user_id=user.id, role=MemberRole.VIEWER))
     db_session.flush()
     db_session.add(Member(workspace_id=workspace.id, user_id=user.id))
 
@@ -69,15 +69,59 @@ def test_member_unique_per_workspace(db_session: Session) -> None:
         db_session.flush()
 
 
+def test_member_token_hash_is_unique(db_session: Session) -> None:
+    workspace = make_workspace(db_session)
+    first, second = make_user(db_session, "A"), make_user(db_session, "B")
+    for user in (first, second):
+        db_session.add(Member(workspace_id=workspace.id, user_id=user.id, token_hash="f" * 64))
+
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+
+
+def _invite(workspace_id: str, created_by: str, token_hash: str = "e" * 64) -> Invite:
+    return Invite(
+        workspace_id=workspace_id,
+        token_hash=token_hash,
+        created_by=created_by,
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+    )
+
+
+def test_invite_defaults_and_unique_token_hash(db_session: Session) -> None:
+    workspace = make_workspace(db_session)
+    invite = _invite(workspace.id, workspace.owner_id)
+    db_session.add(invite)
+    db_session.flush()
+    db_session.refresh(invite)
+
+    assert invite.role is MemberRole.MEMBER
+    assert invite.used_at is None
+
+    db_session.add(_invite(workspace.id, workspace.owner_id))
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+
+
+def test_invite_used_at_requires_used_by(db_session: Session) -> None:
+    workspace = make_workspace(db_session)
+    invite = _invite(workspace.id, workspace.owner_id)
+    invite.used_at = datetime.now(UTC)
+    db_session.add(invite)
+
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+
+
 def test_spec_item_starts_proposed_at_version_one(db_session: Session) -> None:
     workspace = make_workspace(db_session)
-    message = Message(workspace_id=workspace.id, user_id=workspace.owner_id, body="Use Postgres")
+    message = Message(workspace_id=workspace.id, user_id=workspace.owner_id, body="Use SQLite")
     db_session.add(message)
     db_session.flush()
     item = SpecItem(
         workspace_id=workspace.id,
         kind=SpecItemKind.SUGGESTION,
-        text="Use Postgres",
+        text="Use SQLite",
         source_message_ids=[message.id],
     )
     db_session.add(item)
@@ -90,12 +134,23 @@ def test_spec_item_starts_proposed_at_version_one(db_session: Session) -> None:
     assert item.confirmed_by is None
 
 
-def test_invalid_enum_value_is_rejected(db_session: Session) -> None:
+def test_invalid_enum_value_is_rejected_by_orm(db_session: Session) -> None:
     workspace = make_workspace(db_session)
     db_session.add(SpecItem(workspace_id=workspace.id, kind="opinion", text="x"))
 
     with pytest.raises(StatementError):
         db_session.flush()
+
+
+def test_invalid_enum_value_is_rejected_by_database(db_session: Session) -> None:
+    # Bypass the ORM entirely: the CHECK constraint itself must refuse unknown verdicts.
+    run = make_run(db_session, make_workspace(db_session))
+
+    with pytest.raises(IntegrityError):
+        db_session.execute(
+            text("INSERT INTO referee_runs (id, run_id, verdict) VALUES ('r1', :run, 'ok')"),
+            {"run": run.id},
+        )
 
 
 def test_spec_version_numbers_unique_per_workspace(db_session: Session) -> None:
@@ -137,7 +192,7 @@ def test_version_must_be_positive(db_session: Session) -> None:
         db_session.flush()
 
 
-def test_task_arrays_default_empty(db_session: Session) -> None:
+def test_task_id_lists_default_empty(db_session: Session) -> None:
     task = make_task(db_session, make_workspace(db_session))
     db_session.refresh(task)
 
@@ -149,12 +204,11 @@ def test_task_arrays_default_empty(db_session: Session) -> None:
 def test_knowledge_link_round_trip(db_session: Session) -> None:
     workspace = make_workspace(db_session)
     task = make_task(db_session, workspace)
-    req_id = uuid.uuid4()
     db_session.add(
         KnowledgeLink(
             workspace_id=workspace.id,
             src_type=EntityType.REQUIREMENT,
-            src_id=req_id,
+            src_id="req-1",
             dst_type=EntityType.TASK,
             dst_id=task.id,
             relation="implemented_by",
@@ -162,7 +216,7 @@ def test_knowledge_link_round_trip(db_session: Session) -> None:
     )
     db_session.flush()
 
-    link = db_session.scalars(select(KnowledgeLink).where(KnowledgeLink.src_id == req_id)).one()
+    link = db_session.scalars(select(KnowledgeLink).where(KnowledgeLink.src_id == "req-1")).one()
     assert link.dst_type is EntityType.TASK
     assert link.version == 1
 
@@ -171,7 +225,7 @@ def test_submission_and_check_result_defaults(db_session: Session) -> None:
     workspace = make_workspace(db_session)
     submission = Submission(task_id=make_task(db_session, workspace).id, commit_sha="b" * 40)
     check = CheckResult(
-        run_id=make_run(db_session, workspace).id, name="pytest", kind=CheckKind.UNIT_TEST
+        run_id=make_run(db_session, workspace).id, name="pytest", kind=CheckKind.LOCKED_TEST
     )
     db_session.add_all([submission, check])
     db_session.flush()
@@ -182,6 +236,47 @@ def test_submission_and_check_result_defaults(db_session: Session) -> None:
     assert check.status is CheckStatus.PENDING
     assert check.exit_code is None
     assert check.artifacts_json == {}
+
+
+def test_referee_run_defaults_to_not_run(db_session: Session) -> None:
+    referee = RefereeRun(run_id=make_run(db_session, make_workspace(db_session)).id)
+    db_session.add(referee)
+    db_session.flush()
+    db_session.refresh(referee)
+
+    assert referee.verdict is RefereeVerdict.NOT_RUN
+    assert referee.evidence_json == {}
+
+
+def test_hidden_test_stores_location_and_starts_as_draft(db_session: Session) -> None:
+    workspace = make_workspace(db_session)
+    hidden = HiddenTest(
+        workspace_id=workspace.id, author_id=workspace.owner_id, location="/protected/qa_1.py"
+    )
+    db_session.add(hidden)
+    db_session.flush()
+    db_session.refresh(hidden)
+
+    assert hidden.status is HiddenTestStatus.DRAFT
+    assert hidden.approved_by is None
+
+
+def test_credit_ledger_keeps_exact_amounts(db_session: Session) -> None:
+    workspace = make_workspace(db_session)
+    entry = CreditLedger(
+        workspace_id=workspace.id,
+        user_id=workspace.owner_id,
+        kind=CreditKind.USAGE,
+        amount_usd=Decimal("0.012345"),
+        provider="claude",
+        model="test-model",
+    )
+    db_session.add(entry)
+    db_session.flush()
+    db_session.expire(entry)
+
+    assert entry.amount_usd == Decimal("0.012345")
+    assert entry.kind is CreditKind.USAGE
 
 
 @pytest.mark.parametrize("confidence", [-0.1, 1.5])
@@ -220,6 +315,13 @@ def test_job_defaults(db_session: Session) -> None:
 
     assert job.status is JobStatus.QUEUED
     assert job.attempts == 0
+
+
+def test_foreign_keys_are_enforced(db_session: Session) -> None:
+    db_session.add(Message(workspace_id="missing", user_id="missing", body="orphan"))
+
+    with pytest.raises(IntegrityError):
+        db_session.flush()
 
 
 def test_deleting_workspace_cascades_to_children(db_session: Session) -> None:

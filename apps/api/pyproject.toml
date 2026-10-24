@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "forgeitt-api"
+name = "forgeit-api"
 version = "0.1.0"
-description = "FORGEITT backend: AI-native collaborative coding workspace API"
+description = "ForgeIt backend: forged by agents, checked by a referee"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
@@ -13,7 +13,6 @@ dependencies = [
   "uvicorn[standard]>=0.30",
   "sqlalchemy>=2.0",
   "alembic>=1.13",
-  "psycopg[binary]>=3.2",
   "pydantic-settings>=2.4",
 ]
 
@@ -34,6 +33,10 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "N", "S", "C4", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+# The local `alembic/` migrations folder would otherwise make ruff treat the package as first-party.
+known-third-party = ["alembic"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]
