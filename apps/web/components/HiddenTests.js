@@ -16,8 +16,7 @@ export default function HiddenTests({ rid, me, members }) {
   const run = async (fn, ok) => { setMsg(""); try { await fn(); setMsg(ok); await load(); } catch (e) { setMsg(e.message); } };
 
   return (
-    <section className="panel">
-      <h2>Hidden tests</h2>
+    <div>
       <p className="muted">Written by a teammate after the first build, approved by a different person, then run on every change. Agents never see them, and nobody sees their source here.</p>
       <p role="status" className={msg.endsWith(".") && !msg.includes("must") ? "ok" : "err"}>{msg}</p>
       {list.length ? <table><tbody>{list.map((t) => <tr key={t.filename}>
@@ -31,6 +30,6 @@ export default function HiddenTests({ rid, me, members }) {
         <label htmlFor="hc">Test code (uses the project's own fixtures, such as <code>client</code>)</label><textarea id="hc" value={h.content} onChange={(e) => setH({ ...h, content: e.target.value })} />
         <p /><button onClick={() => run(async () => { await api(`/api/rooms/${rid}/holdout`, { rid, body: h }); setH({ filename: "", content: "" }); }, "Submitted. A teammate must approve it.")}>Submit for approval</button>
       </>}
-    </section>
+    </div>
   );
 }

@@ -2,6 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api, API, getToken } from "../lib/api";
 import { mergeMessages, wsUrl } from "../lib/util.mjs";
+import { appendTranscript } from "../lib/speech.mjs";
+import MicButton from "./MicButton";
 
 /**
  * Team chat: history plus live updates over a WebSocket (falls back to polling when the socket
@@ -47,7 +49,8 @@ export default function Chat({ rid, me, members }) {
         <p className="err" role="alert">{err}</p>
         {viewer ? <p className="muted small">You are a viewer: you can read the chat but not post.</p> : (
           <form className="row" onSubmit={send}>
-            <input className="grow" value={text} onChange={(e) => setText(e.target.value)} placeholder="Message the team" aria-label="Message" maxLength={4000} />
+            <input className="grow" value={text} onChange={(e) => setText(e.target.value)} placeholder="Message the team (or press the mic and speak)" aria-label="Message" maxLength={4000} />
+            <MicButton label="Dictate a message" onText={(t) => setText((cur) => appendTranscript(cur, t).slice(0, 4000))} />
             <button disabled={!text.trim()}>Send</button>
           </form>)}
       </section>

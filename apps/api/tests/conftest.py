@@ -13,11 +13,26 @@ _STATE = tempfile.mkdtemp(prefix="forgeit-test-state-")
 os.environ["PLATFORM_DATA"] = tempfile.mkdtemp(prefix="forgeit-test-data-")
 os.environ["PLATFORM_STATE"] = _STATE
 os.environ["DATABASE_URL"] = f"sqlite:///{Path(_STATE, 'forgeit.db').as_posix()}"
+os.environ["FORGEIT_IGNORE_DOTENV"] = "1"  # never read the developer's .env (keys, SMTP login)
 os.environ["REQUIRE_AUTH"] = "0"
 os.environ["LLM_PROVIDER"] = "mock"
 os.environ["VERIFICATION_PROFILE"] = "standard"
+os.environ["OLLAMA_BASE_URL"] = "http://127.0.0.1:9"  # nothing listens: no local model in tests
 os.environ["MIRROR_SANDBOX"] = "host"  # CI has no Docker image; docker mode has its own test
-for _secret in ("TINYFISH_API_KEY", "ANTHROPIC_API_KEY", "PUBLIC_TUNNEL_URL", "MIRROR_PUBLIC_URL"):
+for _secret in (
+    "TINYFISH_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "PUBLIC_TUNNEL_URL",
+    "MIRROR_PUBLIC_URL",
+    "SMTP_USER",
+    "SMTP_APP_PASSWORD",
+    "GEMINI_API_KEY",
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+    "CEREBRAS_API_KEY",
+    "MISTRAL_API_KEY",
+    "GITHUB_MODELS_TOKEN",
+):
     os.environ.pop(_secret, None)
 
 import shutil  # noqa: E402

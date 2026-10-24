@@ -218,3 +218,63 @@ def head(room_id, branch) -> str:
 
 def undo_to(room_id, tag):
     git(original(room_id), "reset", "-q", "--hard", safe_branch(tag), merge_service=True)
+
+
+# ---- read-only file viewer (for people, never agents) ----------------------------------------
+# Hidden tests live outside this repo (holdout/ and holdout_drafts/ beside it), so a git ref can
+# never reach them; the prefixes below are a second guard in case one is ever committed by mistake.
+VIEW_HIDDEN = ("holdout/", "holdout_drafts/", ".git/")
+VIEW_MAX_BYTES = 200_000
+REF_RE = re.compile(r"^(main|[0-9a-f]{40})$")
+
+
+def _view_ref(ref: str) -> str:
+    if not REF_RE.match(ref or ""):
+        raise ValueError("unknown version")
+    return ref
+
+
+def _viewable(path: str) -> bool:
+    return not path.startswith(VIEW_HIDDEN) and "/holdout/" not in path
+
+
+def list_files(room_id, ref="main") -> list[str]:
+    r = git(original(room_id), "ls-tree", "-r", "--name-only", _view_ref(ref))
+    return [p for p in r.stdout.splitlines() if p and _viewable(p)]
+
+
+def read_file(room_id, ref, path) -> dict:
+    """One file's text at a version. Only paths that exist in that version can be read."""
+    if path not in list_files(room_id, ref):
+        raise FileNotFoundError(path)
+    data = subprocess.run(
+        ["git", "show", f"{_view_ref(ref)}:{path}"], cwd=original(room_id), capture_output=True
+    ).stdout
+    binary = b"\0" in data[:8000]
+    text = None if binary else data[:VIEW_MAX_BYTES].decode("utf-8", "replace")
+    return {
+        "path": path,
+        "size": len(data),
+        "binary": binary,
+        "truncated": len(data) > VIEW_MAX_BYTES,
+        "text": text,
+    }
+
+
+def changed_files(room_id, sha) -> list[dict]:
+    """What one change's commit added (A), modified (M) or deleted (D), against its parent."""
+    r = git(original(room_id), "diff", "--name-status", f"{_view_ref(sha)}^", sha, check=False)
+    out = []
+    for line in r.stdout.splitlines():
+        status, _, path = line.partition("\t")
+        if path and _viewable(path):
+            out.append({"status": status[:1], "path": path})
+    return out
+
+
+def file_diff(room_id, sha, path) -> str:
+    if path not in {f["path"] for f in changed_files(room_id, sha)}:
+        raise FileNotFoundError(path)
+    return git(original(room_id), "diff", f"{_view_ref(sha)}^", sha, "--", path).stdout[
+        :VIEW_MAX_BYTES
+    ]

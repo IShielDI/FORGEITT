@@ -5,9 +5,10 @@ portion is used up is stopped before the call: the hard stop at 100%.
 """
 
 from app.core.db import ex, q1
+from app.llm import catalog
 from app.services import events, ledger
 
-FREE_PROVIDERS = ("mock", "ollama")
+FREE_PROVIDERS = ("mock", *catalog.IDS)  # the free tiers and local Ollama cost no credits
 
 
 class BudgetExceededError(Exception):
@@ -15,7 +16,9 @@ class BudgetExceededError(Exception):
 
 
 def price_key(provider: str, model: str) -> str:
-    return "mock" if provider == "mock" else (f"ollama:{model}" if provider == "ollama" else model)
+    if provider == "mock":
+        return "mock"
+    return f"{provider}:{model}" if provider in catalog.IDS else model
 
 
 def _ensure_free_price(provider: str, model: str) -> None:

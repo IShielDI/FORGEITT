@@ -46,3 +46,38 @@ def test_unknown_item_and_failed_observer(api, room):
         assert api.post(f"/api/rooms/{room}/observe").status_code == 503
     finally:
         llm.use_provider(None)
+
+
+def test_conflict_vote_and_owner_decide_through_the_api(api, room):
+    import json as _json
+
+    from app.services import chat, conflicts
+
+    m = ids(api, room)
+    add = chat.post(room, m["riya"], "Build an add to cart button")["id"]
+    rem = chat.post(room, m["aman"], "Remove the add to cart button")["id"]
+    item = {"kind": "requirement", "confidence": 0.9}
+    reply = {
+        "items": [
+            {**item, "text": "Add button", "source_message_ids": [add]},
+            {**item, "text": "Remove button", "source_message_ids": [rem], "replaces_item": 0},
+        ]
+    }
+    llm.use_provider(MockChat([_json.dumps(reply)]))
+    try:
+        api.post(f"/api/rooms/{room}/observe")
+    finally:
+        llm.use_provider(None)
+    c = api.get(f"/api/rooms/{room}/spec").json()["conflicts"][0]
+    a, b = c["earlier"]["id"], c["latest"]["id"]
+
+    bad = api.post(
+        f"/api/spec/conflicts/{c['id']}/vote", json={"choice": 12345, "member_id": m["riya"]}
+    )
+    assert bad.status_code == 400
+    r = api.post(f"/api/spec/conflicts/{c['id']}/vote", json={"choice": a, "member_id": m["riya"]})
+    assert r.json()["status"] == "open"
+    r = api.post(
+        f"/api/spec/conflicts/{c['id']}/decide", json={"choice": b, "member_id": m["riya"]}
+    )
+    assert r.json()["status"] == "resolved" and conflicts.listing(room)[0]["winner_id"] == b

@@ -78,7 +78,7 @@ The project is built one stage at a time. See [BUILD_PROMPTS.md](BUILD_PROMPTS.m
 **Finale slice (MVP):** stages 0 to 18. **Later work:** stages 19 to 25.
 
 ## Getting Started
-**Prerequisites:** Git 2.40+, Python 3.11, Node.js 20+, and Docker (Docker Desktop with at least 8 GB RAM; on Windows, use the WSL2 backend). For real runs you also need a Claude API key, a TinyFish API key, a tunnel tool, and a Gmail app password. None of these are needed for development: `LLM_PROVIDER=mock` works without keys.
+**Prerequisites:** Git 2.40+, Python 3.11, Node.js 20+, and Docker (Docker Desktop with at least 8 GB RAM; on Windows, use the WSL2 backend). For real runs you also need a model key (a free tier such as Gemini, Groq or OpenRouter works, or a Claude key), a TinyFish API key, a tunnel tool, and a Gmail app password. None of these are needed for development: `LLM_PROVIDER=mock` works without keys.
 
 Copy `.env.example` to `.env` (never commit `.env`). Then:
 ```
@@ -93,7 +93,7 @@ pytest -q                                # offline tests, no keys needed
 
 cd apps/web && npm install && npm run build && npm start   # http://localhost:3000; passes /api/* on to the backend (BACKEND_URL)
 ```
-Open http://localhost:3000 and start a workspace. Each person gets one login token, shown once. Enter the workspace, paste your Claude key and a budget, pick an agent and give it a task. The demo shop (`samples/shop`) comes with locked tests and hidden tests (`samples/shop-holdout`). A blank project begins with a **bootstrap**: the agent writes a short spec, the tests and the first app, and a human approves it to make it the locked original.
+Open http://localhost:3000 and start a workspace. Each person gets one login token, shown once. Enter the workspace and pick a model on the **Models** tab: a free tier (Gemini, Groq, OpenRouter, Cerebras, Mistral, GitHub Models, or local Ollama) on your own free key or a shared demo key from `.env`, or Claude on your own key and a budget. Then pick an agent and give it a task. Free tiers cost no credits; keys are stored encrypted and agents never see them. The demo shop (`samples/shop`) comes with locked tests and hidden tests (`samples/shop-holdout`). A blank project begins with a **bootstrap**: the agent writes a short spec, the tests and the first app, and a human approves it to make it the locked original.
 
 Demos: `bash scripts/demo.sh` runs the scripted end-to-end test and the finale loop offline (no keys). `python scripts/finale_demo.py --live` runs the finale loop with a real Claude agent (`ANTHROPIC_API_KEY`, spend capped by `BUDGET`). See [docs/DEMO.md](docs/DEMO.md).
 

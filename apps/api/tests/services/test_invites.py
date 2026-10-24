@@ -10,11 +10,18 @@ def sent(monkeypatch):
     """Stub mail: record what would be sent instead of talking to Gmail."""
     box: list[dict] = []
 
-    def fake_send_invite(to, room_name, link, ttl_days):
-        box.append({"to": to, "room": room_name, "link": link, "ttl": ttl_days})
+    def fake_send_invite(to, room_name, rid, link, code, ttl_days, web_url):
+        box.append(
+            {"to": to, "room": room_name, "rid": rid, "link": link, "code": code, "ttl": ttl_days}
+        )
         return bool(to)
 
+    def fake_send_credentials(to, room_name, rid, name, token, web_url):
+        box.append({"to": to, "login_for": name, "rid": rid, "token": token})
+        return True
+
     monkeypatch.setattr(mail, "send_invite", fake_send_invite)
+    monkeypatch.setattr(mail, "send_credentials", fake_send_credentials)
     return box
 
 
@@ -124,7 +131,10 @@ def test_mail_uses_starttls_and_login(monkeypatch):
     monkeypatch.setattr(config, "SMTP_APP_PASSWORD", "app-password")
     monkeypatch.setattr(mail.smtplib, "SMTP", FakeSMTP)
 
-    assert mail.send_invite("a@example.test", "Demo", "http://x/invite/t", 7) is True
+    assert (
+        mail.send_invite("a@example.test", "Demo", 3, "http://x/invite/t", "t", 7, "http://x")
+        is True
+    )
     assert calls == [
         "connect smtp.gmail.com:587",
         "starttls",
@@ -136,4 +146,52 @@ def test_mail_uses_starttls_and_login(monkeypatch):
 def test_mail_is_skipped_when_not_configured(monkeypatch):
     monkeypatch.setattr(config, "SMTP_USER", "")
 
-    assert mail.send_invite("a@example.test", "Demo", "http://x", 7) is False
+    assert mail.send_invite("a@example.test", "Demo", 3, "http://x", "t", 7, "http://x") is False
+
+
+def test_credentials_mail_has_number_and_token_but_no_api_key(monkeypatch):
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        mail, "send", lambda to, subject, body: sent.append({"to": to, "body": body}) or True
+    )
+
+    assert (
+        mail.send_credentials("zed@example.test", "Demo", 7, "zed", "tok-123", "http://x") is True
+    )
+    assert "Workspace number: 7" in sent[0]["body"] and "tok-123" in sent[0]["body"]
+    assert "sk-ant" not in sent[0]["body"]
+
+
+def test_invite_mail_names_the_workspace_number_and_code(monkeypatch):
+    bodies: list[str] = []
+    monkeypatch.setattr(mail, "send", lambda to, subject, body: bodies.append(body) or True)
+
+    mail.send_invite(
+        "a@example.test", "Shop", 12, "https://w.example/invite/abc", "abc", 7, "https://w.example"
+    )
+
+    assert "Workspace: Shop" in bodies[0] and "Workspace number: 12" in bodies[0]
+    assert "https://w.example/invite/abc" in bodies[0] and "invite code:\nabc" in bodies[0]
+
+
+def test_joining_mails_the_member_their_login_and_peek_prefills_the_email(room, sent):
+    inv = invites.create(room, None, "member", "zoe@example.test")
+    assert invites.peek(inv["token"])["email"] == "zoe@example.test"
+    assert sent[0]["rid"] == room and sent[0]["code"] == inv["token"]
+
+    joined = invites.accept(inv["token"], "zoe")
+
+    assert joined["mailed"] is True
+    assert sent[-1] == {
+        "to": "zoe@example.test",
+        "login_for": "zoe",
+        "rid": room,
+        "token": joined["token"],
+    }
+
+
+def test_joining_without_any_email_mails_nothing(room, sent):
+    inv = invites.create(room, None)
+    joined = invites.accept(inv["token"], "nomail")
+
+    assert joined["mailed"] is False and not any("login_for" in m for m in sent)

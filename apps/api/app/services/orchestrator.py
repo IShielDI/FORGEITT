@@ -177,8 +177,8 @@ def _scope_violations(room, ch, touched):
     """Edit scope (per workspace, off by default): a task's change may only touch the files relevant
     to that task. Computed before this change's own files are linked, so it cannot widen itself."""
     row = q1("SELECT edit_scope FROM rooms WHERE id=?", (room,)) or {}
-    if row.get("edit_scope") != "task" or not ch.get("task_id"):
-        return []
+    if row.get("edit_scope") != "task" or not ch.get("task_id") or ch.get("kind") == "bootstrap":
+        return []  # a first build creates every file, so there is nothing to scope it to yet
     allowed = [f["path"] for f in knowledge.relevant_files(room, ch["task_id"])]
     return [{"path": f, "allowed": allowed} for f in touched if not knowledge.in_scope(f, allowed)]
 

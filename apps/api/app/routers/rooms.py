@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from app.core import auth, config
 from app.core.db import ex, now, q, q1
+from app.llm import catalog as model_catalog
 from app.services import (
     agent_runner,
     context,
@@ -23,10 +24,13 @@ from app.services import (
     hidden_tests,
     invites,
     ledger,
+    mail,
     memory,
+    model_providers,
     orchestrator,
     planner,
     referee,
+    workspaces,
 )
 
 router = APIRouter()
@@ -86,6 +90,14 @@ class FundIn(BaseModel):
 class ChoiceIn(BaseModel):
     choice: str
     backup_model: str | None = None
+
+
+class DeleteRoomIn(BaseModel):
+    confirm_name: str
+
+
+class ProviderKeyIn(BaseModel):
+    key: str
 
 
 class KeyIn(BaseModel):
@@ -156,11 +168,26 @@ def _name(m, fallback=""):
 
 
 def _known_model(model):
+    if model and model_catalog.is_free(model):
+        return  # free tiers ("<provider>:<model>") are metered in tokens, not dollars
     if model and not q1("SELECT 1 x FROM prices WHERE model=?", (model,)):
         raise HTTPException(
             400,
             f"no price known for model '{model}': add it to the prices table first so the meter can count it",
         )
+
+
+def _usable_model(member_id, wanted):
+    """The model a run should use when the person did not pick one: the agent's default if they can
+    run it, otherwise the first ready free model (their own key, a demo key, or local Ollama)."""
+    ready = [p for p in model_providers.overview(member_id) if p["ready"]]
+    pid = model_catalog.split_model(wanted)[0] if wanted else None
+    if wanted and any(p["id"] == pid for p in ready):
+        return wanted
+    free = [p for p in ready if p["free"] and p["models"]]
+    cloud = [p for p in free if p["source"] != "local"]
+    pick = (cloud or free or [None])[0]
+    return pick["models"][0] if pick else wanted
 
 
 def _instance(rid, member):
@@ -281,10 +308,24 @@ def create_room(body: RoomIn):
         (gitops.original(rid) / "protected/contracts/contracts.json").read_text()
     ).items():
         memory.add(rid, "contract", "platform", f"{c[0]}: {c[1]}", by_platform=True)
+    mailed = {  # teammates added at creation get their workspace number and token by email (owner sees theirs on screen)
+        m.name: mail.send_credentials(
+            m.email.strip(), body.name, rid, m.name, tokens[m.name], config.PUBLIC_WEB_URL
+        )
+        for i, m in enumerate(body.members)
+        if i > 0 and m.email.strip()
+    }
     return {
         "id": rid,
         "members": [
-            {"id": mids[n], "name": n, "token": tokens[n], "is_owner": n == names[0]} for n in names
+            {
+                "id": mids[n],
+                "name": n,
+                "token": tokens[n],
+                "is_owner": n == names[0],
+                "mailed": mailed.get(n, False),
+            }
+            for n in names
         ],
         "note": "Each token is shown once. Keep it: it is your login for this workspace.",
     }
@@ -297,6 +338,21 @@ def rooms():
         if not config.REQUIRE_AUTH
         else []
     )  # no listing when logins are on
+
+
+@router.delete("/api/rooms/{rid}")
+def delete_room(rid: int, body: DeleteRoomIn, request: Request):
+    """Owner only, permanent: removes the workspace, its history, keys and files.
+    The owner retypes the workspace name so a stray click cannot do it."""
+    r = _room(rid)
+    if config.REQUIRE_AUTH:
+        auth.owner(request, rid)
+    if body.confirm_name.strip() != r["name"]:
+        raise HTTPException(400, "type the workspace name exactly to delete it")
+    try:
+        return {"deleted": rid, "removed": workspaces.delete(rid)}
+    except workspaces.WorkspaceBusyError as e:
+        raise HTTPException(409, str(e))
 
 
 @router.get("/api/rooms/{rid}")
@@ -347,7 +403,57 @@ def me(rid: int, request: Request, member: int | None = None):
         "has_key": bool(k),
         "key_last4": k["last4"] if k else None,
         "key_type": k["key_type"] if k else None,
+        "ready_providers": [p["id"] for p in model_providers.overview(m["id"]) if p["ready"]],
     }
+
+
+@router.get("/api/rooms/{rid}/me/providers")
+def my_providers(rid: int, request: Request, member: int | None = None):
+    """Claude plus the free-tier providers, with whether each is ready for you (your key, a demo key, or local)."""
+    m = _who(request, rid, member)
+    if not m:
+        raise HTTPException(400, "say who you are (member id)")
+    return model_providers.overview(m["id"])
+
+
+@router.put("/api/rooms/{rid}/me/keys/{provider}")
+def save_provider_key(
+    rid: int, provider: str, body: ProviderKeyIn, request: Request, member: int | None = None
+):
+    """Paste your own free-tier key (Groq, Gemini, OpenRouter...). Encrypted; only the last 4 are shown."""
+    m = _writer(request, rid, member)
+    if not m:
+        raise HTTPException(400, "say who you are (member id)")
+    try:
+        return {
+            "provider": provider,
+            "key_last4": model_providers.save_key(m["id"], provider, body.key),
+        }
+    except model_providers.ProviderKeyError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.delete("/api/rooms/{rid}/me/keys/{provider}")
+def remove_provider_key(rid: int, provider: str, request: Request, member: int | None = None):
+    m = _writer(request, rid, member)
+    if not m:
+        raise HTTPException(400, "say who you are (member id)")
+    if not model_catalog.get(provider):
+        raise HTTPException(404, "unknown provider")
+    model_providers.remove_key(m["id"], provider)
+    return {"provider": provider, "removed": True}
+
+
+@router.get("/api/rooms/{rid}/me/providers/{provider}/models")
+def provider_models(rid: int, provider: str, request: Request, member: int | None = None):
+    """The provider's current model list (free lists change often)."""
+    m = _who(request, rid, member)
+    if not m:
+        raise HTTPException(400, "say who you are (member id)")
+    try:
+        return model_providers.live_models(m["id"], provider)
+    except model_providers.ProviderKeyError as e:
+        raise HTTPException(400, str(e))
 
 
 @router.post("/api/rooms/{rid}/me/key")
@@ -413,9 +519,8 @@ def approve_cc(rid: int, mid: int, request: Request, approver: str = ""):
 
 @router.get("/api/models")
 def models():
-    return [
-        r["model"] for r in q("SELECT model FROM prices ORDER BY input")
-    ]  # models the meter has a price for
+    priced = [r["model"] for r in q("SELECT model FROM prices ORDER BY input")]
+    return priced + model_catalog.suggested_refs()  # priced Claude models, then the free tiers
 
 
 # ---------- agent catalog ----------
@@ -460,6 +565,20 @@ def catalog_delete(rid: int, key: str, request: Request):
 
 
 # ---------- running agents ----------
+BOOTSTRAP_WAITING = ("bootstrap_review", "ready", "referee", "passed", "inconclusive")
+
+
+def _bootstrap_pending(rid) -> bool:
+    """A first build already exists and is waiting to be checked or approved."""
+    marks = ",".join("?" * len(BOOTSTRAP_WAITING))
+    return bool(
+        q1(
+            f"SELECT 1 x FROM changes WHERE room_id=? AND kind='bootstrap' AND status IN ({marks})",  # noqa: S608
+            (rid, *BOOTSTRAP_WAITING),
+        )
+    )
+
+
 def _guard_blank(rid):
     r = _room(rid)
     if r["mode"] == "blank" and not r["bootstrapped"]:
@@ -545,7 +664,12 @@ def run_picked(rid: int, body: RunAsIn, request: Request, wait: bool = False):
     ag = _instance(rid, m)
     ex(
         "UPDATE agents SET part=?, model=?, role=? WHERE id=?",
-        (e["part"], body.model or e["model"] or config.DEFAULT_MODEL, e["key"], ag["id"]),
+        (
+            e["part"],
+            body.model or _usable_model(m["id"], e["model"] or config.DEFAULT_MODEL),
+            e["key"],
+            ag["id"],
+        ),
     )
     role = {"key": e["key"], "label": e["label"], "prompt": e["role_prompt"], "part": e["part"]}
     return _start(rid, ag["name"], body.task, role, boot, wait)
@@ -743,6 +867,51 @@ def change(cid: int, request: Request):
         "SELECT * FROM attempts WHERE room_id=? AND agent=? ORDER BY id", (c["room_id"], c["agent"])
     )
     return c
+
+
+# ---------- file viewer: the project's files and what each change touched (read-only) ----------
+@router.get("/api/rooms/{rid}/files")
+def project_files(rid: int, request: Request, ref: str = "main"):
+    _who(request, rid)
+    try:
+        return gitops.list_files(rid, ref)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(404, f"cannot list files: {e}")
+
+
+@router.get("/api/rooms/{rid}/files/content")
+def project_file(rid: int, path: str, request: Request, ref: str = "main"):
+    _who(request, rid)
+    try:
+        return gitops.read_file(rid, ref, path)
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(404, f"no such file in this version: {e}")
+
+
+def _change_sha(cid: int, request: Request) -> tuple[int, str]:
+    c = q1("SELECT room_id, commit_sha FROM changes WHERE id=?", (cid,))
+    if not c:
+        raise HTTPException(404, "no such change")
+    _who(request, c["room_id"])
+    if not c["commit_sha"]:
+        raise HTTPException(404, "this change has no saved commit to show")
+    return c["room_id"], c["commit_sha"]
+
+
+@router.get("/api/changes/{cid}/files")
+def change_files(cid: int, request: Request):
+    """The files this change added, modified or deleted."""
+    rid, sha = _change_sha(cid, request)
+    return {"commit": sha, "files": gitops.changed_files(rid, sha)}
+
+
+@router.get("/api/changes/{cid}/files/diff")
+def change_file_diff(cid: int, path: str, request: Request):
+    rid, sha = _change_sha(cid, request)
+    try:
+        return {"path": path, "diff": gitops.file_diff(rid, sha, path)}
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(404, f"this change did not touch that file: {e}")
 
 
 @router.post("/api/rooms/{rid}/referee/run")
@@ -996,7 +1165,16 @@ def start_task(task_id: int, body: TaskStartIn, request: Request, wait: bool = F
     ok, why = planner.can_start(task_id)
     if not ok:
         raise HTTPException(409, why)
-    _guard_blank(rid)
+    r = _room(rid)
+    # A blank project has no code yet: its first planned task builds the first version (the
+    # bootstrap), which a person approves to make it the locked baseline for every later task.
+    boot = r["mode"] == "blank" and not r["bootstrapped"]
+    if boot and _bootstrap_pending(rid):
+        raise HTTPException(
+            409,
+            "the first version of this project is waiting for review: approve it on the Work "
+            "tab, then start this task",
+        )
     e = q1("SELECT * FROM agent_catalog WHERE room_id=? AND key=?", (rid, body.agent))
     if not e:
         raise HTTPException(404, "that agent is not in this workspace's catalog")
@@ -1004,7 +1182,12 @@ def start_task(task_id: int, body: TaskStartIn, request: Request, wait: bool = F
     ag = _instance(rid, m)
     ex(
         "UPDATE agents SET part=?, model=?, role=? WHERE id=?",
-        (e["part"], body.model or e["model"] or config.DEFAULT_MODEL, e["key"], ag["id"]),
+        (
+            e["part"],
+            body.model or _usable_model(m["id"], e["model"] or config.DEFAULT_MODEL),
+            e["key"],
+            ag["id"],
+        ),
     )
     ex("UPDATE tasks SET status='in_progress', owner_member_id=? WHERE id=?", (m["id"], task_id))
     role = {"key": e["key"], "label": e["label"], "prompt": e["role_prompt"], "part": e["part"]}
@@ -1015,7 +1198,12 @@ def start_task(task_id: int, body: TaskStartIn, request: Request, wait: bool = F
             " is rejected at submission: if you need another file, file a contract change request.\n"
         )
     text = t["title"] + "\n\n" + (t["description"] or "")
-    return _start(rid, ag["name"], text, role, False, wait, task_id, pack["markdown"])
+    if boot:
+        text = (
+            "This project is empty. Build its first version around this task, using the confirmed "
+            "spec in the context pack:\n\n" + text
+        )
+    return _start(rid, ag["name"], text, role, boot, wait, task_id, pack["markdown"])
 
 
 @router.post("/api/tasks/{task_id}/submit")

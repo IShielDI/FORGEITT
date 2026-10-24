@@ -317,6 +317,33 @@ spec_items = _table(
     Column("decided", Float),
 )
 
+# Two spec items that contradict each other (e.g. "add X" then "remove X"). People pick one; if
+# everyone who argued agrees it settles itself, otherwise the owner makes the final call.
+spec_conflicts = _table(
+    "spec_conflicts",
+    _id(),
+    _room(),
+    Column("item_a", Integer),  # the earlier item
+    Column("item_b", Integer),  # the later item, which reverses it
+    Column("status", Text, server_default=text("'open'")),  # open | resolved
+    Column("winner_id", Integer),
+    Column("decided_how", Text),  # agreement | owner
+    Column("decided_by", Integer),
+    Column("created", Float),
+    Column("decided", Float),
+)
+
+conflict_votes = _table(
+    "conflict_votes",
+    _id(),
+    _room(),
+    Column("conflict_id", Integer, index=True),
+    Column("member_id", Integer),
+    Column("choice", Integer),  # the spec item id this member picked
+    Column("created", Float),
+    UniqueConstraint("conflict_id", "member_id"),
+)
+
 spec_versions = _table(
     "spec_versions",
     _id(),

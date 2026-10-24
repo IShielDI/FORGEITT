@@ -5,12 +5,17 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.core import auth
+from app.core import auth, config
 from app.core.db import q1
 from app.llm.client import LLMError
-from app.services import credits, observer, spec
+from app.services import conflicts, credits, observer, spec
 
 router = APIRouter()
+
+
+class PickIn(BaseModel):
+    choice: int  # the spec item id picked
+    member_id: int | None = None  # only used when logins are off (tests, local scripts)
 
 
 class EditIn(BaseModel):
@@ -31,7 +36,47 @@ def _actor_id(m: dict[str, Any] | None) -> int | None:
 def get_spec(rid: int, request: Request) -> dict[str, Any]:
     _room(rid)
     auth.actor(request, rid)
-    return {"items": spec.items(rid), "approved": spec.approved(rid)}
+    return {
+        "items": spec.items(rid),
+        "approved": spec.approved(rid),
+        "conflicts": conflicts.listing(rid),
+        "plan_stale": conflicts.plan_stale(rid),
+    }
+
+
+def _conflict_room(conflict_id: int) -> int:
+    row = q1("SELECT room_id FROM spec_conflicts WHERE id=?", (conflict_id,))
+    if not row:
+        raise HTTPException(404, "no such conflict")
+    return int(row["room_id"])
+
+
+@router.post("/api/spec/conflicts/{conflict_id}/vote")
+def vote_conflict(conflict_id: int, body: PickIn, request: Request) -> dict[str, Any]:
+    """Pick one side. If everyone who argued picks the same side, it is applied."""
+    rid = _conflict_room(conflict_id)
+    m = auth.writer(request, rid, body.member_id)
+    if not m:
+        raise HTTPException(400, "say who you are (member_id)")
+    try:
+        return conflicts.vote(conflict_id, m["id"], body.choice)
+    except conflicts.ConflictError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/api/spec/conflicts/{conflict_id}/decide")
+def decide_conflict(conflict_id: int, body: PickIn, request: Request) -> dict[str, Any]:
+    """The owner's final call, for when the people who argued do not agree."""
+    rid = _conflict_room(conflict_id)
+    m = (
+        auth.owner(request, rid)
+        if config.REQUIRE_AUTH
+        else auth.writer(request, rid, body.member_id)
+    )
+    try:
+        return conflicts.decide(conflict_id, m["id"] if m else None, body.choice)
+    except conflicts.ConflictError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @router.post("/api/rooms/{rid}/observe")

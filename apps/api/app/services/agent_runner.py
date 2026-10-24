@@ -1,4 +1,4 @@
-"""The step loop. Claude only returns text and tool requests; the platform checks the rules, runs every action in the
+"""The step loop. The model (Claude or a free provider) only returns text and tool requests; the platform checks the rules, runs every action in the
 agent's own workspace, meters the cost, and decides when to pause."""
 
 import json
@@ -10,7 +10,8 @@ from pathlib import Path
 
 from app.core import config
 from app.core.db import ex, now, q1
-from app.llm.providers import AnthropicProvider, ProviderError
+from app.llm import catalog
+from app.llm.providers import AnthropicProvider, OpenAIToolProvider, ProviderError
 from app.services import events, firewall, gitops, ledger, memory
 
 MAX_OUT = 4000
@@ -199,6 +200,25 @@ def _brief(t):
     )[:160]
 
 
+def free_provider(model_ref: str, member_id: int | None) -> OpenAIToolProvider | None:
+    """A free-tier provider for "<provider>:<model>", on the member's own key or the demo key; None without a key."""
+    pid, model = catalog.split_model(model_ref)
+    info = catalog.get(pid)
+    if info is None:
+        return None
+    key = ledger.free_key(member_id, pid)
+    if info.needs_key and not key:
+        return None
+    return OpenAIToolProvider(catalog.base_url(info), key, model, pid, fallbacks=list(info.models))
+
+
+def no_key_message(model_ref: str) -> str:
+    info = catalog.get(catalog.split_model(model_ref)[0])
+    label = info.label if info else model_ref
+    where = info.signup_url if info else ""
+    return f"No {label} key yet: paste a free one under Setup > Models (get one at {where})."
+
+
 def run_task(
     room_id,
     agent_name,
@@ -284,7 +304,13 @@ def run_task(
         # --- choose key / provider and check the budget covers a small buffer ---
         model = ag["backup_model"] if ag["using_backup"] and ag["backup_model"] else ag["model"]
         call_provider, loan_id, key_owner = provider, None, None
-        if call_provider is None:
+        if call_provider is None and catalog.is_free(model):
+            call_provider = free_provider(model, ag["member_id"])
+            if call_provider is None:
+                status = "error"
+                final_text = no_key_message(model)
+                break
+        elif call_provider is None:
             choice = ledger.pick_key(room_id, ag["member_id"])
             if choice is None:
                 status = "paused_budget"

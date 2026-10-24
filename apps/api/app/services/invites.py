@@ -35,7 +35,15 @@ def create(room_id: int, created_by: int | None, role: str = "member", email: st
         (room_id, auth.hash_token(token), role, email.strip(), created_by, now(), expires),
     )
     link = f"{config.PUBLIC_WEB_URL}/invite/{token}"
-    mailed = mail.send_invite(email.strip(), room["name"], link, config.INVITE_TTL_DAYS)
+    mailed = mail.send_invite(
+        email.strip(),
+        room["name"],
+        room_id,
+        link,
+        token,
+        config.INVITE_TTL_DAYS,
+        config.PUBLIC_WEB_URL,
+    )
     return {
         "id": iid,
         "role": role,
@@ -60,13 +68,14 @@ def _find(token: str) -> dict:
 
 
 def peek(token: str) -> dict:
-    """What an invite is for, without using it (room name and role)."""
+    """What an invite is for, without using it (room name, role, and the invited email to pre-fill)."""
     inv = _find(token)
     room = q1("SELECT name FROM rooms WHERE id=?", (inv["room_id"],))
     return {
         "room_id": inv["room_id"],
         "room_name": room["name"] if room else "",
         "role": inv["role"],
+        "email": inv["email"] or "",
     }
 
 
@@ -80,12 +89,13 @@ def accept(token: str, name: str, email: str = "") -> dict:
     if q1("SELECT 1 x FROM members WHERE room_id=? AND name=?", (rid, name)):
         raise ValueError("someone in this workspace already uses that name: pick another")
     member_token = auth.new_token()
+    address = email.strip() or inv["email"] or ""
     mid = ex(
         "INSERT INTO members(room_id,name,email,token_hash,is_owner,role) VALUES(?,?,?,?,0,?)",
         (
             rid,
             name,
-            email.strip() or inv["email"] or "",
+            address,
             auth.hash_token(member_token),
             inv["role"],
         ),
@@ -98,12 +108,17 @@ def accept(token: str, name: str, email: str = "") -> dict:
     if q1("SELECT used_by FROM invites WHERE id=?", (inv["id"],))["used_by"] != mid:
         ex("DELETE FROM members WHERE id=?", (mid,))
         raise InviteError("used", "this invite link has already been used")
+    room = q1("SELECT name FROM rooms WHERE id=?", (rid,))
+    mailed = bool(address) and mail.send_credentials(  # their login for other devices
+        address, room["name"] if room else "", rid, name, member_token, config.PUBLIC_WEB_URL
+    )
     return {
         "room_id": rid,
         "member_id": mid,
         "name": name,
         "role": inv["role"],
         "token": member_token,
+        "mailed": mailed,
     }
 
 

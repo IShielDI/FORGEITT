@@ -1,24 +1,28 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { withToken } from "../lib/api";
+import { api } from "../lib/api";
 
-// Live view of what the agents are doing. Reconnects from the last event it saw.
+// Live view of what the agents are doing.
 export default function Feed({ rid, onFinished }) {
   const [lines, setLines] = useState([]); const [live, setLive] = useState(false); const last = useRef(0); const box = useRef(null);
   useEffect(() => {
-    let es, stop = false, timer;
-    const connect = () => {
-      es = new EventSource(withToken(rid, `/api/rooms/${rid}/events?after=${last.current}`));
-      es.onopen = () => setLive(true);
-      es.onerror = () => { setLive(false); es.close(); if (!stop) timer = setTimeout(connect, 2500); };
-      es.onmessage = (m) => {
-        const e = JSON.parse(m.data); last.current = e.id;
-        setLines((l) => [...l.slice(-299), e]);
-        if (e.kind === "finished") onFinished?.(e);
-      };
+    // Polls the activity list. Plain requests work through every proxy and tunnel (Cloudflare quick tunnels do not support server-sent events).
+    let stop = false, timer, primed = false;
+    const tick = async () => {
+      try {
+        const rows = await api(`/api/rooms/${rid}/events/list?after=${last.current}`, { rid });
+        setLive(true);
+        if (rows.length) {
+          last.current = rows[rows.length - 1].id;
+          setLines((l) => { const have = new Set(l.map((e) => e.id)); return [...l, ...rows.filter((e) => !have.has(e.id))].slice(-300); });   // overlapping polls must not repeat lines
+          if (primed) rows.filter((e) => e.kind === "finished").forEach((e) => onFinished?.(e));   // history is not news
+        }
+        primed = true;
+      } catch { setLive(false); }
+      if (!stop) timer = setTimeout(tick, 1500);
     };
-    connect();
-    return () => { stop = true; clearTimeout(timer); es?.close(); };
+    tick();
+    return () => { stop = true; clearTimeout(timer); };
   }, [rid]);
   useEffect(() => { box.current?.scrollTo(0, box.current.scrollHeight); }, [lines]);
 
@@ -34,7 +38,7 @@ export default function Feed({ rid, onFinished }) {
   };
   return (
     <div>
-      <div className="row small muted"><span aria-live="polite">{live ? "Live" : "Reconnecting…"}</span></div>
+      <div className={"live" + (live ? " on" : "")}><i /><span aria-live="polite">{live ? "Live" : "Reconnecting…"}</span></div>
       <div className="feed" ref={box} role="log" aria-label="Agent activity">{lines.length ? lines.map(render) : <div className="dim">Nothing yet. Pick an agent, describe a task, and press Run.</div>}</div>
     </div>
   );

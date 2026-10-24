@@ -105,7 +105,7 @@ def test_secrets_are_masked_in_repr(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.parametrize(
     ("name", "value"),
-    [("LLM_PROVIDER", "gemini"), ("VERIFICATION_PROFILE", "light"), ("AGENT_SANDBOX", "vm")],
+    [("LLM_PROVIDER", "skynet"), ("VERIFICATION_PROFILE", "light"), ("AGENT_SANDBOX", "vm")],
 )
 def test_rejects_unknown_choices(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
     monkeypatch.setenv(name, value)

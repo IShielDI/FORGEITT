@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from app.core import auth, config
 from app.core.db import ex, q1
 from app.llm.client import LLMError
-from app.services import context, credits, knowledge, planner
+from app.services import conflicts, context, credits, knowledge, planner
 
 router = APIRouter()
 
@@ -47,7 +47,11 @@ def _task(task_id: int) -> dict[str, Any]:
 def get_plan(rid: int, request: Request) -> dict[str, Any]:
     _room(rid)
     auth.actor(request, rid)
-    return {"tasks": planner.tasks(rid), "contracts": planner.contracts(rid)}
+    return {
+        "tasks": planner.tasks(rid),
+        "contracts": planner.contracts(rid),
+        "stale": conflicts.plan_stale(rid),  # task keys built on a replaced spec option
+    }
 
 
 @router.post("/api/rooms/{rid}/plan/generate")
@@ -79,6 +83,17 @@ def patch_task(task_id: int, body: TaskPatch, request: Request) -> dict[str, Any
     auth.writer(request, t["room_id"])
     try:
         return planner.update_task(task_id, body.model_dump(exclude_unset=True))
+    except planner.PlanError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/api/tasks/{task_id}/drop")
+def drop_task(task_id: int, request: Request) -> dict[str, Any]:
+    """Owner only: remove a task that has not started from the plan."""
+    t = _task(task_id)
+    _owner(request, t["room_id"])
+    try:
+        return planner.drop(task_id)
     except planner.PlanError as e:
         raise HTTPException(400, str(e)) from e
 

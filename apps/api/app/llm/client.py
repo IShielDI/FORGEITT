@@ -15,6 +15,7 @@ from pydantic import BaseModel, ValidationError
 
 from app.core import config
 from app.core.db import q1
+from app.llm import catalog
 from app.llm.providers import (
     ClaudeChat,
     MockChat,
@@ -26,7 +27,7 @@ from app.llm.providers import (
 from app.services import credits, ledger
 
 DEFAULT_MAX_TOKENS = 1500
-PROVIDERS = ("claude", "openai_compatible", "ollama", "mock")
+PROVIDERS = ("claude", "openai_compatible", "mock", *catalog.IDS)
 
 
 class ChatProvider(Protocol):
@@ -167,6 +168,14 @@ def make_provider(provider: str, model: str, member_id: int | None = None) -> Ch
         return OpenAICompatChat(config.OPENAI_COMPAT_BASE_URL, config.OPENAI_COMPAT_API_KEY, model)
     if provider == "ollama":
         return OllamaChat(config.OLLAMA_BASE_URL, model)
+    info = catalog.get(provider)
+    if info is not None:
+        key = ledger.free_key(member_id, provider)
+        if not key:
+            raise LLMError(f"no {info.label} key: paste a free one under Setup > Models")
+        chat = OpenAICompatChat(catalog.base_url(info), key, model, fallbacks=list(info.models))
+        chat.name = provider
+        return chat
     raise LLMError(f"unknown provider {provider!r}")
 
 
@@ -188,8 +197,28 @@ def get_client(
     if _override is not None:
         return LLMClient(_override, room_id, member_id, label)
     name = provider or config.LLM_PROVIDER
+    model = config.DEFAULT_MODEL
+    if name == "auto":
+        name, model = auto_choice(room_id, member_id)
     if room_id is not None and name not in allowed_providers(room_id):
         raise LLMError(f"provider {name!r} is not allowed in this workspace")
-    return LLMClient(
-        make_provider(name, config.DEFAULT_MODEL, member_id), room_id, member_id, label
+    return LLMClient(make_provider(name, model, member_id), room_id, member_id, label)
+
+
+def auto_choice(room_id: int | None, member_id: int | None) -> tuple[str, str]:
+    """LLM_PROVIDER=auto: the first model someone can actually use. Background jobs (observer,
+    planner) act for the workspace owner, who is also who they are billed to.
+    Order: a free tier on the person's own key or a demo key, then Claude, else a clear error."""
+    if member_id is None and room_id is not None:
+        owner = q1("SELECT id FROM members WHERE room_id=? AND is_owner=1 ORDER BY id", (room_id,))
+        member_id = owner["id"] if owner else None
+    allowed = allowed_providers(room_id) if room_id is not None else list(PROVIDERS)
+    for info in catalog.CATALOG:
+        if info.needs_key and info.id in allowed and ledger.free_key(member_id, info.id):
+            return info.id, info.models[0]
+    claude_key = (ledger.get_secret(member_id) if member_id else None) or config.ANTHROPIC_API_KEY
+    if claude_key and "claude" in allowed:
+        return "claude", config.DEFAULT_MODEL
+    raise LLMError(
+        "no model is set up yet: add a free key (Gemini, Groq, OpenRouter...) on the Models tab"
     )

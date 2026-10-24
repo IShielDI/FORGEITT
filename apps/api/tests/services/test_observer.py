@@ -110,3 +110,35 @@ def test_due_after_a_batch_of_messages(api, room):
     assert observer.due(room) is False
     _say(api, room, [("riya", "a"), ("aman", "b"), ("riya", "c")])
     assert observer.due(room) is True
+
+
+def test_overlapping_runs_take_turns_and_store_each_item_once(api, room):
+    import threading
+    import time
+
+    (mid,) = _say(api, room, [("riya", "Add a profile button")])
+
+    def slow(_messages):
+        time.sleep(0.3)  # a slow model call widens the window for a second run to start
+        return _reply(
+            {
+                "kind": "requirement",
+                "text": "Add a profile button",
+                "source_message_ids": [mid],
+                "confidence": 0.9,
+            }
+        )
+
+    mock = MockChat([slow, slow])
+    runs = [
+        threading.Thread(target=observer.observe, args=(room, LLMClient(mock, room)))
+        for _ in range(2)
+    ]
+    for t in runs:
+        t.start()
+    for t in runs:
+        t.join()
+
+    rows = q("SELECT id FROM spec_items WHERE room_id=? AND text='Add a profile button'", (room,))
+    assert len(rows) == 1
+    assert len(mock.calls) == 1  # the second run found nothing new and never called the model

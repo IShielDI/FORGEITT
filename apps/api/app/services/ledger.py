@@ -3,6 +3,7 @@ The platform cannot read anyone's real Anthropic balance; this ledger is the fin
 
 from app.core import secrets_store
 from app.core.db import ex, now, q, q1
+from app.llm import catalog
 
 BUFFER = 0.05  # dollars that must remain before a call is allowed
 THRESHOLDS = (70, 80, 90)
@@ -23,6 +24,11 @@ def get_secret(member_id: int, provider: str = "anthropic") -> str | None:
     return secrets_store.decrypt(k["secret_enc"]) if k else None
 
 
+def free_key(member_id: int | None, provider: str) -> str:
+    """Key for a free-tier provider: the member's own if they pasted one, else the shared demo key."""
+    return (get_secret(member_id, provider) if member_id else None) or catalog.demo_key(provider)
+
+
 def contribute(room_id, member_id, amount):
     return ex(
         "INSERT INTO contributions(room_id,member_id,amount) VALUES(?,?,?)",
@@ -31,6 +37,8 @@ def contribute(room_id, member_id, amount):
 
 
 def cost_of(model, tin, tout, tcr=0, tcw=0):
+    if catalog.is_free(model):
+        return 0.0  # free tiers: tokens are still recorded, dollars are not
     p = q1("SELECT * FROM prices WHERE model=?", (model,))
     if not p:
         raise ValueError(f"no price for model {model}")
@@ -141,6 +149,8 @@ def record_call(room, m, agent, model, call_id, tin, tout, tcr, tcw, loan_id, so
         l = q1("SELECT * FROM loans WHERE id=?", (loan_id,))
         cap_reached = l["used"] >= l["cap"]
     pct = balance(room, m)["usage_pct"]
+    if catalog.is_free(model):  # free calls never move the meter, so they cross no checkpoint
+        return {"cost": cost, "pct": pct, "checkpoint": None, "cap_reached": cap_reached}
     crossed = None
     for t in THRESHOLDS:
         if pct >= t and not q1(

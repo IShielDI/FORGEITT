@@ -76,6 +76,7 @@ def test_peek_shows_room_and_role(api, team):
         "room_id": rid,
         "room_name": "Invite Room",
         "role": "viewer",
+        "email": "",
     }
 
 
@@ -113,3 +114,49 @@ def test_invite_listing_is_owner_only_and_hides_tokens(api, team):
     assert api.get(f"/api/rooms/{rid}/invites", headers=h["aman"]).status_code == 403
     listing = api.get(f"/api/rooms/{rid}/invites", headers=h["riya"])
     assert listing.status_code == 200 and inv["token"] not in listing.text
+
+
+def test_teammates_added_at_creation_get_their_login_by_mail(api, monkeypatch):
+    sent: list[tuple] = []
+    monkeypatch.setattr(mail, "send_credentials", lambda *a: sent.append(a) or True)
+    r = api.post(
+        "/api/rooms",
+        json={
+            "name": "Mail Room",
+            "template": "blank",
+            "members": [
+                {"name": "owner", "email": "o@example.test"},
+                {"name": "mate", "email": "m@example.test"},
+                {"name": "nomail"},
+            ],
+        },
+    ).json()
+
+    flags = {m["name"]: m["mailed"] for m in r["members"]}
+    assert flags == {
+        "owner": False,
+        "mate": True,
+        "nomail": False,
+    }  # the owner sees theirs on screen
+    assert len(sent) == 1 and sent[0][0] == "m@example.test" and sent[0][2] == r["id"]
+
+
+def test_only_the_owner_deletes_and_must_retype_the_name(api, team):
+    rid, h = team
+    url = f"/api/rooms/{rid}"
+
+    assert (
+        api.request(
+            "DELETE", url, json={"confirm_name": "Invite Room"}, headers=h["aman"]
+        ).status_code
+        == 403
+    )
+    assert (
+        api.request(
+            "DELETE", url, json={"confirm_name": "invite room"}, headers=h["riya"]
+        ).status_code
+        == 400
+    )
+    r = api.request("DELETE", url, json={"confirm_name": "Invite Room"}, headers=h["riya"])
+    assert r.status_code == 200 and r.json()["deleted"] == rid
+    assert api.get(url, headers=h["riya"]).status_code in (401, 404)  # the token died with the room

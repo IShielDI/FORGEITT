@@ -4,6 +4,7 @@
 REQUIRE_AUTH, ...) are what the services read at call time, so tests can monkeypatch them.
 """
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -14,7 +15,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # apps/api/app/core/config.py -> repo root is four levels up.
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
-LLMProvider = Literal["claude", "openai_compatible", "ollama", "mock"]
+LLMProvider = Literal[
+    "auto",  # the first model someone can use (app/llm/client.py auto_choice)
+    "claude",
+    "openai_compatible",
+    "ollama",
+    "mock",
+    # free tiers (app/llm/catalog.py)
+    "gemini",
+    "groq",
+    "openrouter",
+    "cerebras",
+    "mistral",
+    "github",
+]
 VerificationProfile = Literal["fast", "standard", "strict"]
 SandboxMode = Literal["auto", "docker", "subprocess"]
 
@@ -80,6 +94,13 @@ class Settings(BaseSettings):
     openai_compat_base_url: str | None = None
     openai_compat_api_key: SecretStr | None = None
     ollama_base_url: str = "http://localhost:11434"
+    # Shared free-tier keys for demos (app/llm/catalog.py). Members can also paste their own.
+    gemini_api_key: SecretStr | None = None
+    groq_api_key: SecretStr | None = None
+    openrouter_api_key: SecretStr | None = None
+    cerebras_api_key: SecretStr | None = None
+    mistral_api_key: SecretStr | None = None
+    github_models_token: SecretStr | None = None
 
     # Referee
     tinyfish_api_key: SecretStr | None = None
@@ -151,7 +172,10 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """Return the process-wide settings instance."""
+    """Return the process-wide settings instance. FORGEIT_IGNORE_DOTENV=1 (set by the test suite)
+    skips the .env file so a developer's real keys and SMTP login never reach tests."""
+    if os.environ.get("FORGEIT_IGNORE_DOTENV") == "1":
+        return Settings(_env_file=None)
     return Settings()
 
 
@@ -205,6 +229,18 @@ OPENAI_COMPAT_API_KEY: str = (
     _settings.openai_compat_api_key.get_secret_value() if _settings.openai_compat_api_key else ""
 )
 OLLAMA_BASE_URL: str = _settings.ollama_base_url.rstrip("/")
+FREE_PROVIDER_KEYS: dict[str, str] = {
+    pid: secret.get_secret_value()
+    for pid, secret in {
+        "gemini": _settings.gemini_api_key,
+        "groq": _settings.groq_api_key,
+        "openrouter": _settings.openrouter_api_key,
+        "cerebras": _settings.cerebras_api_key,
+        "mistral": _settings.mistral_api_key,
+        "github": _settings.github_models_token,
+    }.items()
+    if secret
+}
 AGENT_TIME_LIMIT_S: int = _settings.agent_time_limit_s
 MIRROR_SANDBOX: str = _settings.mirror_sandbox
 MIRROR_IMAGE: str = _settings.mirror_image

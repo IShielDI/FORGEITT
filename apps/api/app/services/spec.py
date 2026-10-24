@@ -61,7 +61,17 @@ def snapshot(room_id: int, member_id: int | None) -> int:
     return version
 
 
+def _not_in_open_conflict(item_id: int) -> None:
+    """Items in an open conflict are settled on the conflict card (app/services/conflicts.py)."""
+    if q1(
+        "SELECT 1 x FROM spec_conflicts WHERE status='open' AND (item_a=? OR item_b=?)",
+        (item_id, item_id),
+    ):
+        raise SpecError("this item conflicts with another one: settle the conflict first")
+
+
 def confirm(item_id: int, member_id: int | None) -> dict[str, Any]:
+    _not_in_open_conflict(item_id)
     it = _item(item_id)
     if it["status"] != "proposed":
         raise SpecError(f"only proposed items can be confirmed (this one is {it['status']})")
@@ -77,6 +87,7 @@ def confirm(item_id: int, member_id: int | None) -> dict[str, Any]:
 
 
 def reject(item_id: int, member_id: int | None) -> dict[str, Any]:
+    _not_in_open_conflict(item_id)
     it = _item(item_id)
     if it["status"] != "proposed":
         raise SpecError(f"only proposed items can be rejected (this one is {it['status']})")

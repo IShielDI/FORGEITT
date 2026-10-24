@@ -91,7 +91,9 @@ def generate(room_id: int, client: LLMClient | None = None) -> dict[str, Any]:
     approved = spec.approved(room_id)
     if not approved or not approved["snapshot"]["items"]:
         raise PlanError("confirm at least one spec item before planning")
-    if q1("SELECT 1 x FROM tasks WHERE room_id=? AND status!='proposed'", (room_id,)):
+    if q1(
+        "SELECT 1 x FROM tasks WHERE room_id=? AND status NOT IN ('proposed','dropped')", (room_id,)
+    ):
         raise PlanError("a plan is already approved; change it task by task")
     items = approved["snapshot"]["items"]
     members = q("SELECT id, name FROM members WHERE room_id=? AND role!='viewer'", (room_id,))
@@ -248,6 +250,18 @@ def approve_contract(contract_id: int) -> dict[str, Any]:
     )
     ex("UPDATE contracts SET status='approved' WHERE id=?", (contract_id,))
     return _decode(q1("SELECT * FROM contracts WHERE id=?", (contract_id,)) or {}, "spec_item_ids")
+
+
+def drop(task_id: int) -> dict[str, Any]:
+    """Take a not-yet-started task out of the plan, e.g. when a settled spec conflict replaced the
+    option it was built on. The row is kept (status 'dropped') so the plan's history stays."""
+    t = task(task_id)
+    if t["status"] not in ("proposed", "approved"):
+        raise PlanError(
+            f"only tasks that have not started can be dropped (this one is {t['status']})"
+        )
+    ex("UPDATE tasks SET status='dropped' WHERE id=?", (task_id,))
+    return task(task_id)
 
 
 def can_start(task_id: int) -> tuple[bool, str]:
