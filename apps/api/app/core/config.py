@@ -1,10 +1,14 @@
-"""Application settings loaded from environment variables (and an optional `.env` file)."""
+"""Application settings loaded from environment variables (and an optional `.env` file).
+
+`Settings` is the typed source of truth. The module-level constants below it (DATA, STATE,
+REQUIRE_AUTH, ...) are what the services read at call time, so tests can monkeypatch them.
+"""
 
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # apps/api/app/core/config.py -> repo root is four levels up.
@@ -12,8 +16,10 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 
 LLMProvider = Literal["claude", "openai_compatible", "ollama", "mock"]
 VerificationProfile = Literal["fast", "standard", "strict"]
+SandboxMode = Literal["auto", "docker", "subprocess"]
 
 SQLITE_PREFIX = "sqlite:///"
+DB_FILENAME = "forgeit.db"
 
 
 def resolve_sqlite_url(url: str, base: Path = REPO_ROOT) -> str:
@@ -24,6 +30,10 @@ def resolve_sqlite_url(url: str, base: Path = REPO_ROOT) -> str:
     if path in ("", ":memory:") or Path(path).is_absolute():
         return url
     return f"{SQLITE_PREFIX}{(base / path).resolve().as_posix()}"
+
+
+def _absolute(path: Path) -> Path:
+    return path if path.is_absolute() else (REPO_ROOT / path).resolve()
 
 
 class Settings(BaseSettings):
@@ -37,19 +47,33 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         env_ignore_empty=True,
         extra="ignore",
+        populate_by_name=True,
     )
 
     app_name: str = "ForgeIt API"
     environment: Literal["development", "test", "production"] = "development"
 
-    database_url: str = "sqlite:///./data/forgeit.db"
+    # Platform state (database, encryption key) lives in a SIBLING of the workspace data folder,
+    # never inside or above the agents' workspaces. DATABASE_URL defaults to <state>/forgeit.db.
+    platform_state: Path = Field(
+        Path("./data/state"), validation_alias=AliasChoices("PLATFORM_STATE", "platform_state")
+    )
+    database_url: str = ""
     secret_key: SecretStr = SecretStr("change-me")
-    git_storage_path: Path = Path("./data/git")
+    # Rooms: protected originals, per-task clones, evidence, hidden tests, journeys.
+    git_storage_path: Path = Field(
+        Path("./data/git"),
+        validation_alias=AliasChoices("GIT_STORAGE_PATH", "PLATFORM_DATA", "git_storage_path"),
+    )
     artifact_path: Path = Path("./data/artifacts")
+    sample_project_path: Path = Path("./samples/shop")
+    sample_holdout_path: Path = Path("./samples/shop-holdout")
 
     # Providers (Claude first)
     llm_provider: LLMProvider = "mock"
-    llm_model: str = ""
+    llm_model: str = Field(
+        "claude-sonnet-5-5", validation_alias=AliasChoices("LLM_MODEL", "AGENT_MODEL", "llm_model")
+    )
     anthropic_api_key: SecretStr | None = None
     openai_compat_base_url: str | None = None
     openai_compat_api_key: SecretStr | None = None
@@ -57,7 +81,29 @@ class Settings(BaseSettings):
 
     # Referee
     tinyfish_api_key: SecretStr | None = None
-    public_tunnel_url: str | None = None
+    public_tunnel_url: str | None = Field(
+        None,
+        validation_alias=AliasChoices(
+            "PUBLIC_TUNNEL_URL", "MIRROR_PUBLIC_URL", "public_tunnel_url"
+        ),
+    )
+    referee_step_limit: int = 20
+    referee_runs_per_hour: int = 10
+    # Offline HTTP stand-in for rehearsals/tests only; its results are never a TinyFish verdict.
+    referee_standin: bool = False
+
+    # Agents and sandbox
+    agent_step_limit: int = 40
+    agent_sandbox: SandboxMode = "auto"
+    agent_image: str = "forgeit-agent:latest"
+    # Plain subprocess is NOT a security boundary; only for a throwaway machine with no secrets.
+    allow_unsafe_sandbox: bool = False
+    pile_size: int = 3
+    pile_wait_min: int = 20
+
+    # Access
+    require_auth: bool = True
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     # Invites and mail (Gmail SMTP)
     smtp_host: str = "smtp.gmail.com"
@@ -73,18 +119,57 @@ class Settings(BaseSettings):
 
     verification_profile: VerificationProfile = "fast"
 
-    @field_validator("database_url")
+    @field_validator(
+        "platform_state",
+        "git_storage_path",
+        "artifact_path",
+        "sample_project_path",
+        "sample_holdout_path",
+    )
     @classmethod
-    def _absolute_sqlite_path(cls, value: str) -> str:
-        return resolve_sqlite_url(value)
+    def _absolute_paths(cls, value: Path) -> Path:
+        return _absolute(value)
 
-    @field_validator("git_storage_path", "artifact_path")
-    @classmethod
-    def _absolute_data_path(cls, value: Path) -> Path:
-        return value if value.is_absolute() else (REPO_ROOT / value).resolve()
+    @model_validator(mode="after")
+    def _default_database_in_state(self) -> "Settings":
+        url = (
+            self.database_url or f"{SQLITE_PREFIX}{(self.platform_state / DB_FILENAME).as_posix()}"
+        )
+        self.database_url = resolve_sqlite_url(url)
+        return self
 
 
 @lru_cache
 def get_settings() -> Settings:
     """Return the process-wide settings instance."""
     return Settings()
+
+
+# ---- constants read by the platform services (monkeypatchable in tests) ----
+_settings = get_settings()
+
+DATA: Path = _settings.git_storage_path
+STATE: Path = _settings.platform_state
+SAMPLE: Path = _settings.sample_project_path
+SAMPLE_HOLDOUT: Path = _settings.sample_holdout_path
+DATA.mkdir(parents=True, exist_ok=True)
+STATE.mkdir(parents=True, exist_ok=True)
+
+TINYFISH_KEY: str = (
+    _settings.tinyfish_api_key.get_secret_value() if _settings.tinyfish_api_key else ""
+)
+TINYFISH_BASE = "https://agent.tinyfish.ai"
+MIRROR_PUBLIC_URL: str = _settings.public_tunnel_url or ""
+STEP_LIMIT: int = _settings.referee_step_limit
+RUNS_PER_HOUR: int = _settings.referee_runs_per_hour
+AGENT_STEP_LIMIT: int = _settings.agent_step_limit
+PILE_SIZE: int = _settings.pile_size
+PILE_WAIT_MIN: int = _settings.pile_wait_min
+EXTRA_RUNS_CAP = 2
+DEFAULT_MODEL: str = _settings.llm_model
+AGENT_SANDBOX: str = _settings.agent_sandbox
+AGENT_IMAGE: str = _settings.agent_image
+ALLOW_UNSAFE_SANDBOX: bool = _settings.allow_unsafe_sandbox
+ALLOW_STANDIN: bool = _settings.referee_standin
+REQUIRE_AUTH: bool = _settings.require_auth
+CORS_ORIGINS: list[str] = [o.strip() for o in _settings.cors_origins.split(",") if o.strip()]

@@ -6,14 +6,14 @@ from alembic import context
 
 from app.core.config import get_settings, resolve_sqlite_url
 from app.core.db import create_db_engine
-from app.models import Base
+from app.models import metadata
 
 config = context.config
 
-if config.config_file_name is not None:
+if config.config_file_name is not None and config.attributes.get("configure_logging", True):
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-target_metadata = Base.metadata
+target_metadata = metadata
 
 
 def database_url() -> str:
