@@ -54,10 +54,11 @@ def test_items_in_an_open_conflict_cannot_be_confirmed_one_by_one(api, room):
 def test_when_everyone_who_argued_agrees_it_is_applied(api, room):
     a, b, cid, m = _add_then_remove(api, room)
 
-    first = conflicts.vote(cid, m["riya"], b)
-    assert first["status"] == "open"  # aman has not picked yet
+    start = conflicts.listing(room)[0]
+    assert start["status"] == "open"  # riya backs adding, aman backs removing
+    assert start["earlier"]["backed_by"] == ["riya"] and start["latest"]["backed_by"] == ["aman"]
 
-    done = conflicts.vote(cid, m["aman"], b)
+    done = conflicts.vote(cid, m["riya"], b)  # riya comes round to aman's side
     assert done["status"] == "resolved" and done["decided_how"] == "agreement"
     assert spec.get(b)["status"] == "confirmed" and spec.get(a)["status"] == "rejected"
 
@@ -94,9 +95,9 @@ def test_reversing_a_confirmed_item_supersedes_it_and_flags_the_plan(api, room):
         {"items": [{**_item("Remove the add to cart button", [rem]), "replaces_id": first}]}
     )
     (second,) = observer.observe(room, LLMClient(MockChat([reply]), room))
-    cid = conflicts.listing(room)[0]["id"]
 
-    conflicts.vote(cid, m["riya"], second)  # riya wrote both messages, so her pick settles it
+    # riya said both, nobody else weighed in: she changed her own mind, so her latest word stands
+    assert conflicts.listing(room)[0]["decided_how"] == "self"
 
     assert spec.get(first)["status"] == "superseded" and spec.get(second)["status"] == "confirmed"
     assert conflicts.plan_stale(room) == ["cart-btn"]
@@ -167,3 +168,54 @@ def test_two_real_features_are_not_forced_into_a_conflict(api, room):
     observer.observe(room, LLMClient(MockChat([reply, json.dumps({"reverses": False})]), room))
 
     assert conflicts.listing(room) == []
+
+
+def test_a_chat_reply_that_agrees_counts_as_a_pick_and_can_settle_it(api, room):
+    m = ids(api, room)
+    show = chat.post(room, m["riya"], "Also show the discount on the order page")["id"]
+    hide = chat.post(room, m["aman"], "Actually let's not show the discount on the order page")[
+        "id"
+    ]
+    ok = chat.post(room, m["riya"], "ok got it")["id"]
+    reply = json.dumps(
+        {
+            "items": [
+                _item("Show the discount on the order page", [show]),
+                {**_item("Do not show the discount on the order page", [hide]), "replaces_item": 0},
+            ],
+            "agreements": [{"source_message_id": ok, "item_index": 1}],
+        }
+    )
+    a, b = observer.observe(room, LLMClient(MockChat([reply]), room))
+    c = conflicts.listing(room)[0]
+
+    # riya (who wanted it shown) agreed in chat, aman wrote the latest: everyone agrees
+    assert c["status"] == "resolved" and c["winner_id"] == b and c["decided_how"] == "agreement"
+    assert spec.get(b)["status"] == "confirmed" and spec.get(a)["status"] == "rejected"
+
+
+def test_chat_agreement_from_a_bystander_joins_the_decision(api, room):
+    _a, b, _cid, m = _add_then_remove(api, room)
+    kriti_ok = chat.post(room, m["kriti"], "yes remove it")["id"]
+    reply = json.dumps({"items": [], "agreements": [{"source_message_id": kriti_ok, "item_id": b}]})
+    observer.observe(room, LLMClient(MockChat([reply]), room))
+
+    c = conflicts.listing(room)[0]
+    assert c["status"] == "open" and "kriti" in c["involved"]  # riya and aman still have to pick
+    assert c["latest"]["picked_by"] == ["kriti"]
+
+
+def test_agreements_naming_unknown_items_or_messages_are_ignored(api, room):
+    _a, b, _cid, m = _add_then_remove(api, room)
+    mid = chat.post(room, m["kriti"], "sure")["id"]
+    reply = json.dumps(
+        {
+            "items": [],
+            "agreements": [
+                {"source_message_id": mid, "item_id": 999999},
+                {"source_message_id": 888888, "item_id": b},
+            ],
+        }
+    )
+    observer.observe(room, LLMClient(MockChat([reply]), room))
+    assert conflicts.listing(room)[0]["latest"]["picked_by"] == []

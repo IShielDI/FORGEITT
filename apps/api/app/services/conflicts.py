@@ -30,10 +30,45 @@ def open_conflict(room_id: int, earlier: int, later: int) -> int | None:
         (room_id, earlier, later, later, earlier),
     ):
         return None
-    return ex(
+    cid = ex(
         "INSERT INTO spec_conflicts(room_id,item_a,item_b,status,created) VALUES(?,?,?,'open',?)",
         (room_id, earlier, later, now()),
     )
+    settle_if_agreed(cid)  # e.g. one person said both sides: their latest word stands
+    return cid
+
+
+def stances(c: dict[str, Any]) -> dict[int, int]:
+    """Which side each person involved is on. An explicit pick (button or chat reply) wins;
+    otherwise people back what they said themselves (their latest side if they said both)."""
+    picks = {
+        r["member_id"]: r["choice"]
+        for r in q("SELECT member_id, choice FROM conflict_votes WHERE conflict_id=?", (c["id"],))
+    }
+    earlier_by, latest_by = _authors(c["item_a"]), _authors(c["item_b"])
+    out = {}
+    for person in involved(c):
+        if person in picks:
+            out[person] = picks[person]
+        elif person in latest_by:
+            out[person] = c["item_b"]
+        elif person in earlier_by:
+            out[person] = c["item_a"]
+    return out
+
+
+def settle_if_agreed(conflict_id: int, by: int | None = None) -> bool:
+    """Apply the side everyone involved is on, if they all agree."""
+    c = _get(conflict_id)
+    if c["status"] != "open":
+        return False
+    sides = stances(c)
+    chosen = set(sides.values())
+    if not sides or len(chosen) != 1 or len(sides) != len(involved(c)):
+        return False
+    how = "self" if len(sides) == 1 else "agreement"
+    resolve(conflict_id, chosen.pop(), by or next(iter(sides)), how)
+    return True
 
 
 def in_open_conflict(item_id: int) -> bool:
@@ -60,7 +95,12 @@ def _authors(item_id: int) -> set[int]:
 
 
 def involved(c: dict[str, Any]) -> set[int]:
-    return _authors(c["item_a"]) | _authors(c["item_b"])
+    """Everyone who argued: the authors of either side, plus anyone who agreed with a side in chat."""
+    chat = q(
+        "SELECT member_id FROM conflict_votes WHERE conflict_id=? AND source_message_id IS NOT NULL",
+        (c["id"],),
+    )
+    return _authors(c["item_a"]) | _authors(c["item_b"]) | {r["member_id"] for r in chat}
 
 
 def _get(conflict_id: int) -> dict[str, Any]:
@@ -70,27 +110,24 @@ def _get(conflict_id: int) -> dict[str, Any]:
     return c
 
 
-def vote(conflict_id: int, member_id: int, choice: int) -> dict[str, Any]:
-    """Record a member's pick. Applies it when everyone who argued picked the same option."""
+def vote(
+    conflict_id: int, member_id: int, choice: int, source_message_id: int | None = None
+) -> dict[str, Any]:
+    """Record a member's pick (a button press, or a chat reply when source_message_id is set).
+    Applies it when everyone who argued picked the same option."""
     c = _get(conflict_id)
     if c["status"] != "open":
         raise ConflictError("this conflict is already settled")
     if choice not in (c["item_a"], c["item_b"]):
         raise ConflictError("pick one of the two options in this conflict")
     ex(
-        "INSERT INTO conflict_votes(room_id,conflict_id,member_id,choice,created) VALUES(?,?,?,?,?) "
-        "ON CONFLICT(conflict_id,member_id) DO UPDATE SET choice=excluded.choice, created=excluded.created",
-        (c["room_id"], conflict_id, member_id, choice, now()),
+        "INSERT INTO conflict_votes(room_id,conflict_id,member_id,choice,source_message_id,created) "
+        "VALUES(?,?,?,?,?,?) ON CONFLICT(conflict_id,member_id) DO UPDATE SET "
+        "choice=excluded.choice, created=excluded.created, "
+        "source_message_id=COALESCE(excluded.source_message_id, conflict_votes.source_message_id)",
+        (c["room_id"], conflict_id, member_id, choice, source_message_id, now()),
     )
-    people = involved(c)
-    picks = {
-        r["member_id"]: r["choice"]
-        for r in q(
-            "SELECT member_id, choice FROM conflict_votes WHERE conflict_id=?", (conflict_id,)
-        )
-    }
-    if people and people <= picks.keys() and len({picks[p] for p in people}) == 1:
-        return resolve(conflict_id, choice, member_id, "agreement")
+    settle_if_agreed(conflict_id, member_id)
     return view(_get(conflict_id))
 
 
@@ -157,6 +194,7 @@ def view(c: dict[str, Any]) -> dict[str, Any]:
         for r in q("SELECT id, name FROM members WHERE room_id=?", (c["room_id"],))
     }
     votes = q("SELECT member_id, choice FROM conflict_votes WHERE conflict_id=?", (c["id"],))
+    backing = stances(c) if c["status"] == "open" else {}
 
     def side(item_id: int) -> dict[str, Any]:
         it = spec.get(item_id)
@@ -168,6 +206,9 @@ def view(c: dict[str, Any]) -> dict[str, Any]:
             "by": sorted(names.get(m, "?") for m in _authors(item_id)),
             "picked_by": sorted(
                 names.get(v["member_id"], "?") for v in votes if v["choice"] == item_id
+            ),
+            "backed_by": sorted(
+                names.get(p, "?") for p, side in backing.items() if side == item_id
             ),
         }
 

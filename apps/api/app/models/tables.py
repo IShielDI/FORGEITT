@@ -342,6 +342,7 @@ conflict_votes = _table(
     Column("conflict_id", Integer, index=True),
     Column("member_id", Integer),
     Column("choice", Integer),  # the spec item id this member picked
+    Column("source_message_id", Integer),  # set when the pick came from a chat reply, not a button
     Column("created", Float),
     UniqueConstraint("conflict_id", "member_id"),
 )

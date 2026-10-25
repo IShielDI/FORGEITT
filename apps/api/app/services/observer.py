@@ -42,8 +42,17 @@ class ObservedItem(BaseModel):
     replaces_item: int | None = None  # 0-based index of an earlier item in this same reply
 
 
+class Agreement(BaseModel):
+    """A chat message that clearly sides with one option ("ok got it", "agreed, let's not")."""
+
+    source_message_id: int
+    item_id: int | None = None  # an item in current_spec
+    item_index: int | None = None  # or an item in this same reply
+
+
 class ObserverReply(BaseModel):
     items: list[ObservedItem] = Field(default_factory=list, max_length=MAX_ITEMS)
+    agreements: list[Agreement] = Field(default_factory=list, max_length=MAX_ITEMS)
 
 
 def normalize(text: str) -> str:
@@ -133,6 +142,11 @@ def _observe(room_id: int, client: LLMClient | None) -> list[int]:
             for e in existing
             if e["status"] != "rejected"
         ],
+        "open_conflicts": [
+            {"earlier_id": c["earlier"]["id"], "latest_id": c["latest"]["id"]}
+            for c in conflicts.listing(room_id)
+            if c["status"] == "open"
+        ],
         "messages": [{"id": m["id"], "author": m["author"], "text": m["body"]} for m in window],
     }
     client = client or get_client(room_id, label="observer")
@@ -178,8 +192,30 @@ def _observe(room_id: int, client: LLMClient | None) -> list[int]:
         if earlier:
             conflicts.open_conflict(room_id, earlier, new_id)
     _catch_missed_reversals(room_id, client, created)
+    _record_chat_agreements(reply.data.agreements, window, by_index, live_ids)
     ex("UPDATE rooms SET observer_cursor=? WHERE id=?", (window[-1]["id"], room_id))
     return created
+
+
+def _record_chat_agreements(
+    agreements: list[Agreement],
+    window: list[dict],
+    by_index: dict[int, int],
+    live_ids: set[int],
+) -> None:
+    """A reply that sides with one option of an open conflict counts as that person's pick."""
+    authors = {m["id"]: m.get("member_id") for m in window}
+    for ag in agreements:
+        member = authors.get(ag.source_message_id)
+        item = by_index.get(ag.item_index) if ag.item_index is not None else ag.item_id
+        if not member or not item or (ag.item_index is None and item not in live_ids):
+            continue  # uncited, from outside this window, or naming an unknown item
+        c = q1(
+            "SELECT id FROM spec_conflicts WHERE status='open' AND (item_a=? OR item_b=?)",
+            (item, item),
+        )
+        if c:
+            conflicts.vote(c["id"], member, item, source_message_id=ag.source_message_id)
 
 
 def _catch_missed_reversals(room_id: int, client: LLMClient, created: list[int]) -> None:

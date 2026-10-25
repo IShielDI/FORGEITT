@@ -33,14 +33,14 @@ export default function Spec({ rid, me }) {
       <div className={"conflict-side" + (label === "Latest" ? " latest" : "")}>
         <span className="eyebrow">{label}{s.status === "confirmed" ? " · confirmed earlier" : ""}</span>
         <p><span className={`badge ${s.kind}`}>{s.kind}</span> {s.text}</p>
-        <p className="muted small">Said by {s.by.join(", ") || "a person"} · picked by {s.picked_by.join(", ") || "nobody yet"}</p>
+        <p className="muted small">Said by {s.by.join(", ") || "a person"} · backed by {(s.backed_by || s.picked_by).join(", ") || "nobody yet"}</p>
         {!viewer && <div className="row">
           <button className={mine ? "" : "quiet"} aria-pressed={mine} onClick={() => act(() => api(`/api/spec/conflicts/${c.id}/vote`, { rid, body: { choice: s.id } }))}>{mine ? "Your pick" : "Pick this"}</button>
           {owner && <button className="go" onClick={() => act(() => api(`/api/spec/conflicts/${c.id}/decide`, { rid, body: { choice: s.id } }))}>Decide: keep this</button>}
         </div>}
       </div>);
   };
-  const waiting = (c) => c.involved.filter((n) => !c.earlier.picked_by.includes(n) && !c.latest.picked_by.includes(n));
+  const waiting = (c) => c.involved.filter((n) => !(c.earlier.backed_by || []).includes(n) && !(c.latest.backed_by || []).includes(n));
   const row = (i) => (
     <li key={i.id} className="spec-item">
       <span className={`badge ${i.kind}`}>{i.kind}</span> {editing === i.id
@@ -64,11 +64,11 @@ export default function Spec({ rid, me }) {
         {!viewer && <button className="quiet" onClick={() => act(() => api(`/api/rooms/${rid}/observe`, { rid, method: "POST" }))}>Check the chat now</button>}
       </div>
       {open.length > 0 && <section className="panel conflicts"><h2>Conflicting decisions ({open.length})</h2>
-        <p className="muted small">The chat changed its mind. Pick the option you want: if everyone who argued picks the same one, it is applied. If they disagree, the workspace owner makes the final call. Only the chosen option goes into the spec and the plan.</p>
+        <p className="muted small">The chat changed its mind. Everyone backs what they said until they pick otherwise (a reply like "ok, agreed" in chat counts too). When everyone involved backs the same option it is applied; if they disagree, the workspace owner makes the final call. Only the chosen option goes into the spec and the plan.</p>
         {open.map((c) => <div key={c.id} className="conflict">
           <div className="conflict-pair">{side(c, c.earlier, "Earlier")}{side(c, c.latest, "Latest")}</div>
           <div className="row small">
-            <span className="muted grow">{waiting(c).length ? `Waiting for: ${waiting(c).join(", ")}` : "Everyone who argued has picked, but they disagree: the owner decides."}</span>
+            <span className="muted grow">{waiting(c).length ? `Waiting for: ${waiting(c).join(", ")}` : "They disagree. It settles when one side changes their pick (or agrees in chat); otherwise the owner decides."}</span>
             {owner && <button className="quiet" onClick={() => act(() => api(`/api/spec/conflicts/${c.id}/decide`, { rid, body: { choice: 0 } }))}>Not a conflict: both can stand</button>}
           </div>
         </div>)}
@@ -79,7 +79,8 @@ export default function Spec({ rid, me }) {
       {settled.length > 0 && <section className="panel"><h2>Settled conflicts</h2><ul className="plain">{settled.map((c) => {
         if (c.decided_how === "both") return <li key={c.id} className="small">Kept both “{c.earlier.text}” and “{c.latest.text}” · the owner said they do not conflict</li>;
         const win = c.winner_id === c.latest.id ? c.latest : c.earlier, lose = win === c.latest ? c.earlier : c.latest;
-        return <li key={c.id} className="small">Kept “{win.text}” over “{lose.text}” · {c.decided_how === "agreement" ? "everyone who argued agreed" : "decided by the owner"}</li>; })}</ul></section>}
+        const how = { agreement: "everyone involved agreed", self: "the same person changed their mind", owner: "decided by the owner" }[c.decided_how] || c.decided_how;
+        return <li key={c.id} className="small">Kept “{win.text}” over “{lose.text}” · {how}</li>; })}</ul></section>}
     </div>
   );
 }
