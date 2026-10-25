@@ -27,6 +27,11 @@ async def run_sse(req: Request):
         from fastapi.responses import JSONResponse
 
         return JSONResponse({"error": "bad key"}, status_code=401)
+    if STATE["mode"] == "beta" and "agent_config" in body:
+        from fastapi.responses import JSONResponse
+
+        msg = "Your account is not enabled for custom max steps yet. Join the beta program."
+        return JSONResponse({"error": {"code": "FORBIDDEN", "message": msg}}, status_code=403)
     if STATE["mode"] == "402":
         from fastapi.responses import JSONResponse
 
@@ -68,6 +73,39 @@ async def run_sse(req: Request):
 def cancel(rid: str, req: Request):
     STATE["cancelled"].append((rid, req.headers.get("x-api-key")))
     return {"status": "CANCELLED"}
+
+
+PNG = b"PNG-fake-image-bytes"
+
+
+@fake.get("/v1/runs/{rid}")
+def run_detail(rid: str, req: Request):
+    base = str(req.base_url).rstrip("/")
+    return {
+        "steps": [
+            {"action": "open the shop", "screenshot": f"{base}/shots/0.png"},
+            {"action": "broken link", "screenshot": f"{base}/shots/missing.png"},
+        ],
+        "video_url": f"{base}/video.webm",
+    }
+
+
+@fake.get("/shots/{name}")
+def shot(name: str, req: Request):
+    from fastapi.responses import JSONResponse, Response
+
+    if req.headers.get("x-api-key") != "key-123":
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if name != "0.png":
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return Response(PNG, media_type="image/png")
+
+
+@fake.get("/video.webm")
+def video():
+    from fastapi.responses import Response
+
+    return Response(b"WEBM-fake-video-bytes", media_type="video/webm")
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -197,3 +235,41 @@ def test_agent_failure_needs_a_human_not_blame_on_the_app():
 def test_system_failure_is_a_service_error():
     rr = run("sysfail")
     assert referee.judge(rr, FakeMirror([]), "t@x.com")[0] == "service_error"
+
+
+def test_accounts_without_the_step_cap_beta_retry_without_it():
+    rr = run("beta", limit=12)
+    first, second = STATE["bodies"][-2], STATE["bodies"][-1]
+    assert "agent_config" in first and "agent_config" not in second
+    assert second["capture_config"]["recording"]  # evidence is still requested
+    assert rr.status == "COMPLETED" and rr.error is None
+
+
+def test_evidence_downloads_real_images_and_video_never_error_bodies(tmp_path):
+    rr = referee.RunResult("tinyfish")
+    rr.run_id = "r1"
+    referee.TinyFishRunner("key-123").collect_evidence(rr, tmp_path)
+
+    assert (tmp_path / "step00.png").read_bytes() == PNG  # needed the key: sent to TinyFish only
+    assert not (tmp_path / "step01.png").exists()  # a 404 body is never saved as an image
+    assert (tmp_path / "run.mp4").read_bytes() == b"WEBM-fake-video-bytes"
+    assert rr.steps[0]["screenshot"] == "step00.png" and "screenshot" not in rr.steps[1]
+
+
+def test_the_key_is_never_sent_to_another_host(monkeypatch):
+    seen = []
+
+    def fake_get(url, headers=None, **kw):
+        seen.append((url, headers))
+        return httpx.Response(
+            401, json={"error": "Unauthorized"}, request=httpx.Request("GET", url)
+        )
+
+    import httpx
+
+    monkeypatch.setattr(referee.httpx, "get", fake_get)
+    assert (
+        referee.TinyFishRunner("key-123")._media("https://cdn.elsewhere.test/a.png", "image/", 5)
+        is None
+    )
+    assert seen == [("https://cdn.elsewhere.test/a.png", None)]

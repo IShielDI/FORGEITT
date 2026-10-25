@@ -101,14 +101,23 @@ class TinyFishRunner:
         return {"X-API-Key": self.key, "Content-Type": "application/json"}
 
     def run(self, url, goal, step_limit):
-        rr = RunResult(self.name)
-        # max_steps and capture_config are documented request fields; our own PROGRESS count below stays as a second guard.
+        # max_steps and capture_config are documented request fields; our own PROGRESS count below
+        # stays as a second guard, so the step cap can be dropped where the account lacks it.
         body = {
             "url": url,
             "goal": goal,
             "agent_config": {"max_steps": step_limit},
             "capture_config": {"screenshots": True, "recording": True},
         }
+        rr = self._run(body, step_limit)
+        if rr.error and "403" in rr.error and "max steps" in rr.error.lower():
+            # some accounts are not enabled for a custom step cap (a TinyFish beta): run without it
+            body.pop("agent_config")
+            rr = self._run(body, step_limit)
+        return rr
+
+    def _run(self, body, step_limit):
+        rr = RunResult(self.name)
         try:
             with httpx.stream(
                 "POST",
@@ -193,18 +202,33 @@ class TinyFishRunner:
         ] or rr.steps
         for i, s in enumerate(steps):
             u = s.get("screenshot")
-            if isinstance(u, str) and u.startswith("http"):
-                try:
-                    (out / f"step{i:02d}.png").write_bytes(httpx.get(u, timeout=30).content)
-                    rr.steps[i]["screenshot"] = f"step{i:02d}.png"
-                except Exception:
-                    pass
+            data = self._media(u, "image/", 30) if isinstance(u, str) else None
+            if data:
+                (out / f"step{i:02d}.png").write_bytes(data)
+                rr.steps[i]["screenshot"] = f"step{i:02d}.png"
         v = run.get("video_url")
-        if v:
-            try:
-                (out / "run.mp4").write_bytes(httpx.get(v, timeout=60).content)
-            except Exception:
-                pass
+        data = self._media(v, "video/", 60) if isinstance(v, str) else None
+        if data:
+            (out / "run.mp4").write_bytes(data)
+
+    def _media(self, url: str, kind: str, timeout: int) -> bytes | None:
+        """Fetch an evidence file. Signed links work as they are; links on TinyFish's own host may
+        need the API key, which is never sent anywhere else. Error bodies are never saved as media."""
+        if not url.startswith("http"):
+            return None
+        same_host = httpx.URL(url).host == httpx.URL(config.TINYFISH_BASE).host
+        try:
+            r = httpx.get(url, timeout=timeout, follow_redirects=True)
+            if r.status_code in (401, 403) and same_host:
+                r = httpx.get(url, headers=self.headers, timeout=timeout, follow_redirects=True)
+        except httpx.HTTPError:
+            return None
+        ctype = r.headers.get("content-type", "")
+        if r.status_code != 200 or not (
+            ctype.startswith(kind) or ctype == "application/octet-stream"
+        ):
+            return None
+        return r.content
 
 
 class LocalRunner:

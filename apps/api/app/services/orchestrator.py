@@ -315,6 +315,38 @@ def _check(room, branches, batch_dir: Path, label):
         m.destroy()
 
 
+class RefereeNotReadyError(ValueError):
+    pass
+
+
+def referee_now(change_id: int) -> int:
+    """Send one change to the referee right away instead of waiting for the batch (3 changes or
+    PILE_WAIT_MIN minutes). A change that was checked by tests only (the Fast level was on) is put
+    back in the queue first. Returns the room id; the caller runs run_referee(room, force=True)."""
+    from app.services import verify
+
+    c = q1("SELECT * FROM changes WHERE id=?", (change_id,))
+    if not c:
+        raise LookupError("no such change")
+    room = c["room_id"]
+    if verify.profile_of(room) == "fast":
+        raise RefereeNotReadyError(
+            "this workspace checks with Fast (tests only): switch to Standard or Strict in Setup first"
+        )
+    if q1("SELECT 1 x FROM changes WHERE room_id=? AND status='referee'", (room,)):
+        raise RefereeNotReadyError("the referee is already checking a change here: wait for it")
+    retry = c["verdict"] in ("service_error", "browser_failure", "not_run")  # not the app's fault
+    if (c["status"] == "passed" and c["verdict"] == "tests_only") or (
+        c["status"] in ("referee_failed", "inconclusive") and retry
+    ):
+        ex("UPDATE changes SET status='ready', ready_at=? WHERE id=?", (now(), change_id))
+    elif c["status"] != "ready":
+        raise RefereeNotReadyError(
+            f"this change is {c['status'].replace('_', ' ')}, not waiting for the referee"
+        )
+    return room
+
+
 def run_referee(room, force=False):
     ready = q("SELECT * FROM changes WHERE room_id=? AND status='ready' ORDER BY id", (room,))
     if not ready or not (force or pile_due(room)):

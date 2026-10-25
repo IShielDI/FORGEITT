@@ -916,6 +916,29 @@ def change_file_diff(cid: int, path: str, request: Request):
         raise HTTPException(404, f"this change did not touch that file: {e}")
 
 
+@router.post("/api/changes/{cid}/referee")
+def referee_for_change(cid: int, request: Request):
+    """Run the referee for this change now (it normally waits for a batch). Runs in the background;
+    the change's panel shows the verdict when it arrives."""
+    c = q1("SELECT room_id FROM changes WHERE id=?", (cid,))
+    if not c:
+        raise HTTPException(404, "no such change")
+    _writer(request, c["room_id"])
+    try:
+        rid = orchestrator.referee_now(cid)
+    except orchestrator.RefereeNotReadyError as e:
+        raise HTTPException(409, str(e))
+    threading.Thread(target=_safe_referee, args=(rid,), daemon=True).start()
+    return {"started": True}
+
+
+def _safe_referee(rid: int) -> None:
+    try:
+        orchestrator.run_referee(rid, force=True)
+    except Exception as e:  # keep the server up; the change keeps its last status
+        print("referee run failed:", type(e).__name__, e)
+
+
 @router.post("/api/rooms/{rid}/referee/run")
 def referee_run(rid: int, request: Request, force: bool = True):
     _writer(request, rid)

@@ -50,6 +50,12 @@ export default function Ladder({ rid, id, me, onChanged }) {
             {x.t.startsWith("Referee") && vid && <video controls src={vid} onError={(e) => (e.currentTarget.style.display = "none")} />}
           </li>
         ))}
+        {me?.role !== "viewer" && (c.status === "ready" || (c.status === "passed" && c.verdict === "tests_only") || (["referee_failed", "inconclusive"].includes(c.status) && ["service_error", "browser_failure", "not_run"].includes(c.verdict))) && <li data-s="wait">
+          <h3>Referee</h3>
+          <p>{c.status === "ready" ? "Waiting for a batch of changes (the referee checks several at once to save runs)." : c.verdict === "tests_only" ? "Only tests checked this change, because the workspace was on Fast." : "The referee service had a problem, not the app. You can run it again."}</p>
+          <button className="quiet" onClick={() => act(() => api(`/api/changes/${id}/referee`, { rid, method: "POST" }))}>{c.status === "ready" ? "Run the referee now" : c.verdict === "tests_only" ? "Check with the referee too" : "Run the referee again"}</button>
+        </li>}
+        {c.status === "referee" && <li data-s="wait"><h3>Referee</h3><p>The referee is checking it in a real browser now. This takes a few minutes; the result appears here.</p></li>}
         <li data-s={c.status === "merged" ? "pass" : canApprove ? "wait" : "skip"}>
           <h3>Human approval</h3>
           <p>{c.status === "merged" ? "Merged." : c.status === "undone" ? "Merged, then undone." : canApprove ? "Everything above checked out. A person decides." : "Not ready to approve."}</p>
