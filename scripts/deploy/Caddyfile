@@ -1,0 +1,11 @@
+# Public entry point. Caddy gets and renews the HTTPS certificate for FORGEIT_DOMAIN by itself.
+{$FORGEIT_DOMAIN} {
+	# API (including the chat WebSocket and evidence videos) goes straight to the backend.
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+	# Everything else is the web app. No compression: the live activity stream must not be held back.
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+}

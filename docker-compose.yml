@@ -1,0 +1,56 @@
+# ForgeIt on one always-on Linux server (docs/adr/ADR-007-always-on-server.md).
+# Set up with: bash scripts/deploy/setup-server.sh [your-domain]
+#
+# All three services use host networking, like the laptop setup: the mirror publishes the
+# candidate app on the host's 127.0.0.1 and the referee tunnel must reach it there.
+# Only Caddy listens publicly (80/443); the API and the web app listen on loopback.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Absolute paths that are the same on the host and in this container, so the sandbox and
+      # mirror containers it starts (through the host's Docker) can mount them.
+      PLATFORM_DATA: /srv/forgeit/data/git
+      PLATFORM_STATE: /srv/forgeit/data/state
+      ARTIFACT_PATH: /srv/forgeit/data/artifacts
+      DATABASE_URL: sqlite:////srv/forgeit/data/state/forgeit.db
+      AGENT_SANDBOX: docker
+      MIRROR_SANDBOX: docker
+      PUBLIC_WEB_URL: https://${FORGEIT_DOMAIN}
+      CORS_ORIGINS: https://${FORGEIT_DOMAIN}
+    group_add:
+      - "${DOCKER_GID:-999}" # may use the host's Docker to start sandboxes (see the ADR)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /srv/forgeit/data:/srv/forgeit/data
+
+  web:
+    build: ./apps/web
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://127.0.0.1:8000
+    depends_on:
+      - api
+
+  caddy:
+    image: caddy:2.8.4
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      FORGEIT_DOMAIN: ${FORGEIT_DOMAIN}
+    volumes:
+      - ./scripts/deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -102,6 +102,14 @@ Contributors and AI agents should read [AGENTS.md](AGENTS.md) first.
 ### Sharing with teammates
 The machine that runs the backend and Docker is the host; everyone else only needs a browser. On the host, `cloudflared tunnel --url http://localhost:3000` prints an https address to send to the team, and each person signs in with their own token. Only share the link with teammates and stop the tunnel when you are done. The host stores everyone's keys, so only give a host you trust a key with a small budget.
 
+### Permanent deployment (always on)
+ForgeIt needs Docker on the same machine (every agent command and check runs in a container), so it runs on a small Linux server rather than a serverless host. See [ADR-007](docs/adr/ADR-007-always-on-server.md).
+1. Create an Ubuntu 22.04 or 24.04 VM with at least 2 vCPUs and 4 GB RAM (for example Oracle Cloud Always Free, DigitalOcean, Hetzner or AWS Lightsail) and allow inbound ports 22, 80 and 443 in its firewall.
+2. On the server: `git clone <your repo> forgeit && cd forgeit && bash scripts/deploy/setup-server.sh`. Without a domain it uses the free address `<server-ip>.sslip.io`; with one, point its A record at the server and pass it: `bash scripts/deploy/setup-server.sh forgeit.example.com`.
+3. Add your keys to `.env` on the server (`GEMINI_API_KEY`, `TINYFISH_API_KEY`, `SMTP_USER`, `SMTP_APP_PASSWORD`), then `sudo docker compose up -d`.
+
+Caddy issues the HTTPS certificate on the first visit and routes `/api/*` (including the chat WebSocket) to the API. Data lives in `/srv/forgeit/data` on the server: back it up. Update with `git pull && sudo docker compose up -d --build`.
+
 ### Isolation (read before running real agents)
 - Agent commands run in **Docker** with no network, no keys, all capabilities dropped, memory/CPU/PID limits, only their own clone mounted, and `protected/` (locked tests and contracts) mounted read-only. If Docker or the `forgeit-agent` image is missing, the platform **refuses** to run a real model's commands. `ALLOW_UNSAFE_SANDBOX=true` overrides that on a throwaway machine only; it is not a security boundary.
 - Model calls are made by the backend, never from inside the sandbox: keys stay on the host, encrypted at rest (Fernet).

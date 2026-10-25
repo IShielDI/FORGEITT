@@ -184,6 +184,7 @@ Common rules:
 
 ## 9. Deployment
 - Local first: backend and web on the host laptop. Sandboxes, the mirror and the referee tunnel run on the same host with Docker.
+- Always on (ADR-007): the same pieces on one Linux VM with `docker compose` (API, web, Caddy for HTTPS). `scripts/deploy/setup-server.sh` sets it up; the API starts sandboxes through the host's Docker.
 - Provider keys (and any house key) live only in the backend environment on the host.
 
 ## 10. Definition of Done (per stage)
